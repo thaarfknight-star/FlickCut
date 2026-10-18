@@ -1,0 +1,83 @@
+# FlickCut — first real builds (Tauri v2).
+#
+# Builds the app on all three desktop OSes. Green here = the first real
+# FlickCut installers. Runs on every push to main, on PRs, and on demand.
+#
+# Signing is intentionally NOT configured yet (decision: deferred until the
+# public release). macOS builds are unsigned (Gatekeeper: right-click -> Open
+# on first launch), Windows builds are unsigned, and the updater signature
+# step is skipped until TAURI_SIGNING_PRIVATE_KEY exists as a repo secret.
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 22.04: recommended baseline for maximum glibc compat.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend-spike/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # Tauri v2 baseline + xcap (screen/window enumeration) system deps.
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            pkg-config libclang-dev \
+            libxcb1-dev libxrandr-dev libdbus-1-dev \
+            libpipewire-0.3-dev libwayland-dev libegl-dev
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend-spike
+
+      - name: Build with Tauri Action
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Empty until the signing ceremony happens (pre-release).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        with:
+          projectPath: src-tauri
+          args: --target ${{ matrix.target }}
+
+      - name: Report bundle sizes
+        shell: bash
+        run: |
+          echo "### Bundle sizes (${{ matrix.os }})" >> "$GITHUB_STEP_SUMMARY"
+          find src-tauri/target/${{ matrix.target }}/release/bundle \
+            -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' \
+              -o -name '*.dmg' -o -name '*.msi' -o -name '*.zip' -o -name '*.tar.gz' \) \
+            -exec ls -lh {} \; 2>/dev/null \
+            | awk '{print "- " $9 " (" $5 ")"}' >> "$GITHUB_STEP_SUMMARY" || true
