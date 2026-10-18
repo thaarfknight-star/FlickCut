@@ -1,8 +1,27 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Taha Arefi
+//! FlickCut Tauri v2 application shell — integration owner: TAgent5.
+//!
+//! Registers the frozen IPC contract v1 (`docs/ipc-contract-v1.md`):
+//! 6 frontend commands + 3 frontend events.
+//!   - list_sources    -> real (xcap enumeration; team decision 2026-10-18:
+//!                        `scap` is unmaintained, do not use)
+//!   - analyze_moments -> real (flickcut-moments crate)
+//!   - render_video    -> real (flickcut-render crate + ffmpeg sidecar)
+//!   - start/stop_recording, import_video -> STUBS owned by the shell
+//!     (session clock + tick events); TAgent's recorder plugs capture in.
+//!
+//! The 4 internal `input_*` commands belong to the flickcut-input crate
+//! (testing/debugging) and are not part of the frontend contract.
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 
 use serde::{Deserialize, Serialize};
@@ -63,6 +82,178 @@ fn analyze_moments(
 #[derive(serde::Serialize)]
 struct AnalyzeMomentsResponse {
     markers: Vec<flickcut_moments::Marker>,
+}
+
+// ---------------------------------------------------------------------------
+// list_sources (IPC contract v1) — shell-owned, real implementation
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+struct ScreenInfo {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct WindowInfo {
+    id: String,
+    title: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SourceList {
+    screens: Vec<ScreenInfo>,
+    windows: Vec<WindowInfo>,
+}
+
+/// Contract: `list_sources()` -> `{ screens: [{id, name}], windows: [{id, title}] }`.
+///
+/// Real implementation via xcap. Minimized windows (no capturable surface)
+/// and untitled helper windows are filtered out of the picker.
+#[tauri::command]
+fn list_sources() -> Result<SourceList, String> {
+    let mut screens = Vec::new();
+    for monitor in xcap::Monitor::all().map_err(|e| e.to_string())? {
+        let id = monitor.id().map_err(|e| e.to_string())?;
+        let name = monitor
+            .name()
+            .unwrap_or_else(|_| format!("Display {}", id));
+        screens.push(ScreenInfo {
+            id: id.to_string(),
+            name,
+        });
+    }
+    let mut windows = Vec::new();
+    for window in xcap::Window::all().map_err(|e| e.to_string())? {
+        if window.is_minimized().unwrap_or(false) {
+            continue;
+        }
+        let title = window.title().unwrap_or_default();
+        if title.trim().is_empty() {
+            continue;
+        }
+        let id = window.id().map_err(|e| e.to_string())?;
+        windows.push(WindowInfo {
+            id: id.to_string(),
+            title,
+        });
+    }
+    Ok(SourceList { screens, windows })
+}
+
+// ---------------------------------------------------------------------------
+// start/stop_recording + import_video (IPC contract v1) — shell stubs
+// ---------------------------------------------------------------------------
+
+/// Shell-owned session record. `id`/`source_id` are read by TAgent's
+/// recorder module once it plugs in.
+#[allow(dead_code)]
+struct ActiveSession {
+    id: String,
+    source_id: String,
+    started_at: Instant,
+    ticking: Arc<AtomicBool>,
+}
+
+/// The active recording session, if any.
+type SessionState = Arc<Mutex<Option<ActiveSession>>>;
+
+#[derive(Debug, Clone, Serialize)]
+struct SessionInfo {
+    session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StopInfo {
+    video_path: String,
+    duration_sec: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct RecordingTick {
+    elapsed_sec: u64,
+}
+
+fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// Contract: `start_recording(source_id)` -> `{ session_id }`.
+/// Emits `flickcut://recording-tick` every second while recording.
+///
+/// STUB: the shell owns the session clock and tick events so the UI works
+/// end-to-end. TAgent's recorder plugs capture + the real session clock in
+/// here (and fills `SessionsState` for `analyze_moments`).
+#[tauri::command]
+fn start_recording(
+    source_id: String,
+    app: tauri::AppHandle,
+    sessions: tauri::State<SessionState>,
+) -> Result<SessionInfo, String> {
+    let mut guard = sessions.lock().map_err(|e| e.to_string())?;
+    if guard.is_some() {
+        return Err("a recording session is already active".into());
+    }
+    let id = format!("sess-{}", now_millis());
+    let started_at = Instant::now();
+    let ticking = Arc::new(AtomicBool::new(true));
+
+    let tick_flag = ticking.clone();
+    std::thread::spawn(move || {
+        while tick_flag.load(Ordering::Relaxed) {
+            std::thread::sleep(Duration::from_secs(1));
+            if !tick_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            let elapsed = started_at.elapsed().as_secs();
+            app.emit(
+                "flickcut://recording-tick",
+                RecordingTick {
+                    elapsed_sec: elapsed,
+                },
+            )
+            .ok();
+        }
+    });
+
+    *guard = Some(ActiveSession {
+        id: id.clone(),
+        source_id,
+        started_at,
+        ticking,
+    });
+    // NOTE: the input telemetry epoch should come from the session clock
+    // (open item carried over from the input crate wiring).
+    Ok(SessionInfo { session_id: id })
+}
+
+/// Contract: `stop_recording()` -> `{ video_path, duration_sec }`.
+///
+/// STUB: stops the session clock. The recorder will return the real file.
+#[tauri::command]
+fn stop_recording(sessions: tauri::State<SessionState>) -> Result<StopInfo, String> {
+    let mut guard = sessions.lock().map_err(|e| e.to_string())?;
+    let session = guard.take().ok_or("no active recording session")?;
+    session.ticking.store(false, Ordering::Relaxed);
+    let duration_sec = session.started_at.elapsed().as_secs_f64();
+    Ok(StopInfo {
+        video_path: String::new(), // filled by the recorder module
+        duration_sec,
+    })
+}
+
+/// Contract: `import_video(path)` -> `{ session_id }`.
+///
+/// STUB: imports an existing video file as a session (no telemetry).
+#[tauri::command]
+fn import_video(path: String) -> Result<SessionInfo, String> {
+    let _ = path;
+    Ok(SessionInfo {
+        session_id: format!("import-{}", now_millis()),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +379,7 @@ async fn render_video(
 
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Forward every discrete input event to the frontend.
             // (The 30 Hz cursor trail is polled via the `input_trail`
@@ -202,6 +394,8 @@ fn main() {
             app.manage(Arc::new(Mutex::new(
                 HashMap::<String, flickcut_moments::SessionData>::new(),
             )));
+            // Shell-owned recording session (stub until the recorder lands).
+            app.manage(SessionState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -211,6 +405,11 @@ fn main() {
             input_clear,
             analyze_moments,
             render_video,
+            // Shell-owned contract commands
+            list_sources,
+            start_recording,
+            stop_recording,
+            import_video,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FlickCut");
