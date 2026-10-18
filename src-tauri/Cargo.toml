@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/flickcut-input"]
+members = [".", "crates/flickcut-input", "crates/flickcut-moments"]
 resolver = "2"
 
 [package]
