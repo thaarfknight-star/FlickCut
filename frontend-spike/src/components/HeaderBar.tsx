@@ -4,9 +4,15 @@ interface Props {
   elapsed: string;
   recording: boolean;
   version: string;
+  onMinimize: () => void;
 }
 
-export default function HeaderBar({ elapsed, recording, version }: Props) {
+export default function HeaderBar({
+  elapsed,
+  recording,
+  version,
+  onMinimize,
+}: Props) {
   return (
     <header
       style={{
@@ -73,8 +79,13 @@ export default function HeaderBar({ elapsed, recording, version }: Props) {
       >
         {recording ? "● REC" : "READY"}
       </span>
-      <button className="btn btn-sm">Check for Updates</button>
-      <button className="btn btn-sm">About</button>
+      <button
+        className="btn btn-sm"
+        title="Minimize to floating bar"
+        onClick={onMinimize}
+      >
+        ▭ Bar
+      </button>
     </header>
   );
 }

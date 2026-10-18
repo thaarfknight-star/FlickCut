@@ -106,6 +106,25 @@ export async function mockInvoke<T>(
       } as unknown as T;
     }
 
+    // NOTE: pause/resume are NOT in contract v1 (frozen). Mock-only until
+    // DEVagent decides on pause_recording/resume_recording for v1.1.
+    case "pause_recording_mock": {
+      if (tickTimer) window.clearInterval(tickTimer);
+      if (inputTimer) window.clearInterval(inputTimer);
+      tickTimer = inputTimer = null;
+      return {} as unknown as T;
+    }
+
+    case "resume_recording_mock": {
+      tickTimer = window.setInterval(() => {
+        recElapsed += 1;
+        emit(EVENTS.RECORDING_TICK, {
+          elapsed_sec: recElapsed,
+        } as RecordingTick);
+      }, 1000);
+      return {} as unknown as T;
+    }
+
     case COMMANDS.ANALYZE_MOMENTS: {
       void args["session_id"];
       // scale markers into the recorded duration for realism

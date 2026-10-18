@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import FloatingBar from "./components/FloatingBar";
 import HeaderBar from "./components/HeaderBar";
 import LibraryDock from "./components/LibraryDock";
 import PreviewPane from "./components/PreviewPane";
@@ -12,7 +13,9 @@ import {
   onInputEvent,
   onRecordingTick,
   onRenderProgress,
+  pauseRecording,
   renderVideo,
+  resumeRecording,
   startRecording,
   stopRecording,
   type EffectType,
@@ -21,7 +24,10 @@ import {
 } from "./ipc/tauriApi";
 import { formatTime, regionsFromMarkers } from "./mockData";
 
+type View = "bar" | "editor";
+
 export default function App() {
+  const [view, setView] = useState<View>("bar");
   const [markers, setMarkers] = useState<Marker[]>([]);
   const [regions, setRegions] = useState<Region[]>([]);
   const [selectedRegion, setSelectedRegion] = useState<number | null>(null);
@@ -33,16 +39,17 @@ export default function App() {
   const [videoPath, setVideoPath] = useState<string>("");
   const [duration, setDuration] = useState(0);
   const [recording, setRecording] = useState(false);
+  const [paused, setPaused] = useState(false);
+  const [micOn, setMicOn] = useState(true);
   const [elapsed, setElapsed] = useState(0);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [log, setLog] = useState<string[]>([
-    `FlickCut editor — contract v1, ${isRunningInTauri() ? "Tauri shell" : "mock backend"}.`,
+    `FlickCut — contract v1, ${isRunningInTauri() ? "Tauri shell" : "mock backend"}.`,
   ]);
 
   const addLog = (line: string) => setLog((l) => [...l.slice(-49), line]);
 
-  // boot: capture sources (contract: { screens, windows })
   useEffect(() => {
     listSources()
       .then((s) => {
@@ -58,7 +65,6 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // contract events while recording
   useEffect(() => {
     if (!recording) return;
     const offTick = onRecordingTick((t) => setElapsed(t.elapsed_sec));
@@ -71,7 +77,6 @@ export default function App() {
     };
   }, [recording]);
 
-  // contract event: render progress
   useEffect(() => {
     return onRenderProgress((p) => {
       setProgress(p.percent);
@@ -82,11 +87,8 @@ export default function App() {
   const region = selectedRegion != null ? regions[selectedRegion] : null;
 
   const patchRegion = (index: number, patch: Partial<Region>) =>
-    setRegions((rs) =>
-      rs.map((r, i) => (i === index ? { ...r, ...patch } : r))
-    );
+    setRegions((rs) => rs.map((r, i) => (i === index ? { ...r, ...patch } : r)));
 
-  /** stop -> analyze -> suggest regions (shared by record + import) */
   const finishSession = async (sid: string, vpath: string, dur: number) => {
     setVideoPath(vpath);
     setDuration(dur);
@@ -102,25 +104,13 @@ export default function App() {
     }
   };
 
-  const toggleRecording = async () => {
+  const handleRecord = async () => {
     if (busy) return;
-    if (recording) {
-      try {
-        const { video_path, duration_sec } = await stopRecording();
-        const sid = sessionId;
-        setRecording(false);
-        setSessionId("");
-        addLog(`Recording stopped — ${duration_sec}s saved.`);
-        await finishSession(sid, video_path, duration_sec);
-      } catch (e) {
-        addLog(`stop_recording failed: ${String(e)}`);
-      }
-      return;
-    }
     try {
       const { session_id } = await startRecording(sourceId);
       setSessionId(session_id);
       setRecording(true);
+      setPaused(false);
       setElapsed(0);
       setMarkers([]);
       setRegions([]);
@@ -128,6 +118,42 @@ export default function App() {
       addLog(`Recording started (${session_id}) on ${sourceId}.`);
     } catch (e) {
       addLog(`start_recording failed: ${String(e)}`);
+    }
+  };
+
+  const handleStop = async () => {
+    try {
+      const { video_path, duration_sec } = await stopRecording();
+      const sid = sessionId;
+      setRecording(false);
+      setPaused(false);
+      setSessionId("");
+      addLog(`Recording stopped — ${duration_sec}s saved.`);
+      await finishSession(sid, video_path, duration_sec);
+      // Recordly flow: stopping opens the editor
+      setView("editor");
+    } catch (e) {
+      addLog(`stop_recording failed: ${String(e)}`);
+    }
+  };
+
+  const handlePause = async () => {
+    try {
+      await pauseRecording();
+      setPaused(true);
+      addLog("Recording paused.");
+    } catch (e) {
+      addLog(`pause failed: ${String(e)}`);
+    }
+  };
+
+  const handleResume = async () => {
+    try {
+      await resumeRecording();
+      setPaused(false);
+      addLog("Recording resumed.");
+    } catch (e) {
+      addLog(`resume failed: ${String(e)}`);
     }
   };
 
@@ -153,6 +179,68 @@ export default function App() {
     }
   };
 
+  /* -- floating-bar view (the launch UI, Recordly-style) ------------- */
+  if (view === "bar") {
+    return (
+      <div
+        style={{
+          height: "100vh",
+          overflow: "hidden",
+          position: "relative",
+          background:
+            "radial-gradient(1200px 700px at 50% 20%, #141b28 0%, #0A0C10 70%)",
+        }}
+      >
+        {/* fake desktop backdrop so the floating bar reads as floating */}
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 12,
+            color: "#6d717b",
+            userSelect: "none",
+          }}
+        >
+          <img
+            src="logo-transparent.png"
+            alt=""
+            style={{ height: 72, opacity: 0.35 }}
+          />
+          <div style={{ fontSize: 15, letterSpacing: 1 }}>
+            {recording
+              ? "Recording… use the bar below to pause or stop"
+              : "FlickCut is running — hit record when the action starts"}
+          </div>
+          {!recording && videoPath && (
+            <button className="btn" onClick={() => setView("editor")}>
+              Open editor
+            </button>
+          )}
+        </div>
+        <FloatingBar
+          recording={recording}
+          paused={paused}
+          elapsed={formatTime(elapsed)}
+          sources={sourceOptions}
+          sourceId={sourceId}
+          micOn={micOn}
+          onSourceChange={setSourceId}
+          onMicToggle={() => setMicOn((m) => !m)}
+          onRecord={handleRecord}
+          onPause={handlePause}
+          onResume={handleResume}
+          onStop={handleStop}
+          onOpenEditor={() => setView("editor")}
+        />
+      </div>
+    );
+  }
+
+  /* -- editor view (opens after stop, Recordly flow) ------------------ */
   return (
     <div
       style={{
@@ -166,6 +254,7 @@ export default function App() {
         elapsed={formatTime(elapsed)}
         recording={recording}
         version="0.3.0-tauri"
+        onMinimize={() => setView("bar")}
       />
       <div
         style={{ flex: 1, display: "flex", gap: 10, padding: 12, minHeight: 0 }}
@@ -193,33 +282,24 @@ export default function App() {
             minWidth: 0,
           }}
         >
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={{ fontSize: 12, color: "#a1a8b6" }}>Source</span>
-            <select
-              className="input"
-              style={{ maxWidth: 280 }}
-              value={sourceId}
-              onChange={(e) => setSourceId(e.target.value)}
-              disabled={recording}
-            >
-              {sourceOptions.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
+          <PreviewPane recording={false} />
+          <div
+            style={{
+              fontSize: 11,
+              color: "#6d717b",
+              textAlign: "center",
+            }}
+          >
+            {videoPath ? `Editing ${videoPath}` : "Record from the bar to begin"}
           </div>
-          <PreviewPane recording={recording} />
         </div>
         <SettingsDock
           region={region}
-          recording={recording}
           busy={busy}
           progress={progress}
           log={log}
           onEffectChange={(e: EffectType) => {
-            if (selectedRegion != null)
-              patchRegion(selectedRegion, { effect: e });
+            if (selectedRegion != null) patchRegion(selectedRegion, { effect: e });
           }}
           onIntensityChange={(v) => {
             if (selectedRegion != null)
@@ -242,9 +322,7 @@ export default function App() {
               setSelectedRegion(next.indexOf(nr));
               return next;
             });
-            addLog(
-              `Region added: ${nr.start.toFixed(1)}s–${nr.end.toFixed(1)}s.`
-            );
+            addLog(`Region added: ${nr.start.toFixed(1)}s–${nr.end.toFixed(1)}s.`);
           }}
           onDeleteRegion={() => {
             if (selectedRegion == null) return;
@@ -252,10 +330,13 @@ export default function App() {
             setSelectedRegion(null);
             addLog("Region deleted.");
           }}
-          onToggleRecording={toggleRecording}
+          onToggleRecording={() => {
+            // in the editor, recording controls live on the bar
+            setView("bar");
+            addLog("Use the floating bar to record.");
+          }}
           onImport={async () => {
             try {
-              // mock path — the shell will open a file dialog
               const { session_id: sid } = await importVideo("/mock/import.mp4");
               addLog(`Import: session ${sid}.`);
               await finishSession(sid, "/mock/import.mp4", 124.5);
