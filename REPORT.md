@@ -87,10 +87,43 @@ updater keys.
 
 1. **Identifier:** draft uses `com.flickcut.app` (placeholder). Must be
    final before first public build — it becomes the bundle ID, install
-   paths, and the WebView data directory.
+   paths, and the WebView data directory. Note: Tauri warns that an
+   identifier ending in `.app` conflicts with the macOS bundle extension,
+   so `com.flickcut.app` should change regardless.
 2. **Frontend stack:** config assumes Vite on port 1420 (`npm run dev`).
    Confirm React/Vue/Svelte choice.
 3. **Windows target priority:** NSIS first (simplest UX). MSI only if
    enterprise deployment matters.
 4. **Signing:** Windows cert + Apple Developer Program ($99/yr) needed
    before public installers; unsigned builds are fine for internal testing.
+
+## 7. Size measurement (2026-10-18)
+
+**Local full build: blocked by sandbox.** I installed the Rust toolchain
+and all Tauri Linux system deps and got as far as compiling 541 dependency
+crates, but this VM's filesystem intermittently rejects writes (EPERM on
+write, 0-byte files, SQLite I/O errors in cargo's index cache, build
+artifacts vanishing mid-build). Not a Tauri problem — the environment.
+
+**Triangulated numbers (labeled by source):**
+
+- Measured by me: empty Rust release binary = **444 KB** (the floor —
+  Tauri adds its runtime on top).
+- Measured by me: `tauri icon` output sizes — `icon.ico` 48 KB,
+  `icon.icns` 672 KB (icons are negligible in the total).
+- Real shipped Tauri 2 app (masturbyte.com, moderately complex dashboard
+  app): **Linux AppImage 4.2 MB, .deb 2.8 MB, Windows NSIS 1.2 MB,
+  .msi 1.8 MB, macOS .dmg 2.1 MB** — hello-world binary 618 KB.
+- Official Tauri docs: AppImage grows from the 2–6 MB range toward
+  **70+ MB** when bundling extra system dependencies.
+
+**The honest caveat for FlickCut:** with `bundleMediaFramework: true`
+(gstreamer for a screen recorder) the Linux AppImage will land well above
+the 4 MB minimal case — budget **tens of MB**, not single digits, on Linux.
+Windows NSIS stays small (WebView2 downloads on demand, not bundled).
+This still beats the old Python+PyInstaller builds (38–69 MB per platform
+in v0.2.x) on every platform.
+
+Recommendation: run the first real `tauri build` on a clean GitHub Actions
+runner (per-OS matrix) and record the actual artifact sizes there — that is
+the number Taha should see before any size promise.
