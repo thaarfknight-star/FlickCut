@@ -4,12 +4,12 @@
 //!
 //! Registers the frozen IPC contract v1 (`docs/ipc-contract-v1.md`):
 //! 6 frontend commands + 3 frontend events.
-//!   - list_sources    -> real (xcap enumeration; team decision 2026-10-18:
-//!                        `scap` is unmaintained, do not use)
+//!   - list_sources    -> real (flickcut-capture backend enumeration)
 //!   - analyze_moments -> real (flickcut-moments crate)
 //!   - render_video    -> real (flickcut-render crate + ffmpeg sidecar)
-//!   - start/stop_recording, import_video -> STUBS owned by the shell
-//!     (session clock + tick events); TAgent's recorder plugs capture in.
+//!   - start/stop_recording -> real (flickcut-capture Session + shared
+//!     session clock; input telemetry starts on the same epoch)
+//!   - import_video    -> STUB (session id only, no telemetry)
 //!
 //! The 4 internal `input_*` commands belong to the flickcut-input crate
 //! (testing/debugging) and are not part of the frontend contract.
@@ -21,7 +21,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
 
 use serde::{Deserialize, Serialize};
@@ -36,9 +36,9 @@ type SessionsState = Arc<Mutex<flickcut_moments::SessionStore>>;
 
 #[tauri::command]
 fn input_start(state: tauri::State<TelemetryState>) -> Result<(), String> {
-    // NOTE: the epoch should come from the recording session clock
-    // (TAgent's session module). Until that wiring lands, each start
-    // creates its own epoch.
+    // NOTE: during a recording, start_recording() starts telemetry on the
+    // shared session-clock epoch. This command is for manual/testing use and
+    // is idempotent (a running telemetry keeps its epoch).
     let mut t = state.lock().map_err(|e| e.to_string())?;
     t.start(std::time::Instant::now());
     Ok(())
@@ -108,50 +108,42 @@ struct SourceList {
 
 /// Contract: `list_sources()` -> `{ screens: [{id, name}], windows: [{id, title}] }`.
 ///
-/// Real implementation via xcap. Minimized windows (no capturable surface)
-/// and untitled helper windows are filtered out of the picker.
+/// Real implementation via the flickcut-capture backend enumeration, so the
+/// returned ids are exactly what `start_recording(source_id)` accepts.
 #[tauri::command]
 fn list_sources() -> Result<SourceList, String> {
-    let mut screens = Vec::new();
-    for monitor in xcap::Monitor::all().map_err(|e| e.to_string())? {
-        let id = monitor.id().map_err(|e| e.to_string())?;
-        let name = monitor
-            .name()
-            .unwrap_or_else(|_| format!("Display {}", id));
-        screens.push(ScreenInfo {
-            id: id.to_string(),
-            name,
-        });
-    }
-    let mut windows = Vec::new();
-    for window in xcap::Window::all().map_err(|e| e.to_string())? {
-        if window.is_minimized().unwrap_or(false) {
-            continue;
-        }
-        let title = window.title().unwrap_or_default();
-        if title.trim().is_empty() {
-            continue;
-        }
-        let id = window.id().map_err(|e| e.to_string())?;
-        windows.push(WindowInfo {
-            id: id.to_string(),
-            title,
-        });
-    }
-    Ok(SourceList { screens, windows })
+    let list = flickcut_capture::list_sources();
+    Ok(SourceList {
+        screens: list
+            .screens
+            .into_iter()
+            .map(|s| ScreenInfo {
+                id: s.id,
+                name: s.name,
+            })
+            .collect(),
+        windows: list
+            .windows
+            .into_iter()
+            .map(|s| WindowInfo {
+                id: s.id,
+                title: s.name,
+            })
+            .collect(),
+    })
 }
 
 // ---------------------------------------------------------------------------
-// start/stop_recording + import_video (IPC contract v1) — shell stubs
+// start/stop_recording + import_video (IPC contract v1) — real wiring
 // ---------------------------------------------------------------------------
 
-/// Shell-owned session record. `id`/`source_id` are read by TAgent's
-/// recorder module once it plugs in.
-#[allow(dead_code)]
+/// Capture frames per second for recordings.
+const RECORD_FPS: u32 = 60;
+
+/// Shell-owned session record. Holds the live capture session; `stop()`
+/// consumes it and finalizes the video file.
 struct ActiveSession {
-    id: String,
-    source_id: String,
-    started_at: Instant,
+    capture: Option<flickcut_capture::Session>,
     ticking: Arc<AtomicBool>,
 }
 
@@ -181,67 +173,147 @@ fn now_millis() -> u128 {
         .unwrap_or(0)
 }
 
+/// Where to write the recording: `<video_dir>/flickcut-<millis>.mp4`,
+/// falling back to the system temp dir.
+fn recording_output_path(app: &tauri::AppHandle) -> std::path::PathBuf {
+    let dir = app
+        .path()
+        .video_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    dir.join(format!("flickcut-{}.mp4", now_millis()))
+}
+
 /// Contract: `start_recording(source_id)` -> `{ session_id }`.
 /// Emits `flickcut://recording-tick` every second while recording.
 ///
-/// STUB: the shell owns the session clock and tick events so the UI works
-/// end-to-end. TAgent's recorder plugs capture + the real session clock in
-/// here (and fills `SessionsState` for `analyze_moments`).
+/// Real implementation: starts the flickcut-capture session (this blocks
+/// while the Linux portal picker waits for the user), then starts input
+/// telemetry on the SAME session-clock epoch so kill moments line up with
+/// video frames.
 #[tauri::command]
-fn start_recording(
+async fn start_recording(
     source_id: String,
     app: tauri::AppHandle,
     sessions: tauri::State<SessionState>,
+    telemetry: tauri::State<TelemetryState>,
 ) -> Result<SessionInfo, String> {
-    let mut guard = sessions.lock().map_err(|e| e.to_string())?;
-    if guard.is_some() {
-        return Err("a recording session is already active".into());
+    {
+        let guard = sessions.lock().map_err(|e| e.to_string())?;
+        if guard.is_some() {
+            return Err("a recording session is already active".into());
+        }
     }
-    let id = format!("sess-{}", now_millis());
-    let started_at = Instant::now();
-    let ticking = Arc::new(AtomicBool::new(true));
 
+    let output_path = recording_output_path(&app);
+
+    // Blocking capture start on a worker thread (the portal picker needs
+    // user interaction and must not stall the Tauri runtime).
+    let capture = tauri::async_runtime::spawn_blocking(move || {
+        flickcut_capture::Session::start(&source_id, RECORD_FPS, &output_path)
+    })
+    .await
+    .map_err(|e| format!("capture task panicked: {e}"))?
+    .map_err(|e| e.to_string())?;
+
+    let session_id = capture.id().to_string();
+    let clock = capture.clock();
+
+    // Input telemetry on the shared session epoch. If telemetry was already
+    // running (e.g. a manual input_start), restart it so the epochs match.
+    {
+        let t = telemetry.lock().map_err(|e| e.to_string())?;
+        if t.running() {
+            t.stop();
+        }
+        t.clear();
+        t.start(clock.t0_instant());
+    }
+
+    // Tick events driven by the session clock.
+    let ticking = Arc::new(AtomicBool::new(true));
     let tick_flag = ticking.clone();
+    let tick_clock = clock.clone();
+    let tick_app = app.clone();
     std::thread::spawn(move || {
         while tick_flag.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_secs(1));
             if !tick_flag.load(Ordering::Relaxed) {
                 break;
             }
-            let elapsed = started_at.elapsed().as_secs();
-            app.emit(
+            let _ = tick_app.emit(
                 "flickcut://recording-tick",
                 RecordingTick {
-                    elapsed_sec: elapsed,
+                    elapsed_sec: tick_clock.elapsed_sec() as u64,
                 },
-            )
-            .ok();
+            );
         }
     });
 
-    *guard = Some(ActiveSession {
-        id: id.clone(),
-        source_id,
-        started_at,
-        ticking,
-    });
-    // NOTE: the input telemetry epoch should come from the session clock
-    // (open item carried over from the input crate wiring).
-    Ok(SessionInfo { session_id: id })
+    {
+        let mut guard = sessions.lock().map_err(|e| e.to_string())?;
+        // Re-check: a concurrent start could have won while we blocked.
+        if guard.is_some() {
+            return Err("a recording session is already active".into());
+        }
+        *guard = Some(ActiveSession {
+            capture: Some(capture),
+            ticking,
+        });
+    }
+
+    Ok(SessionInfo { session_id })
 }
 
 /// Contract: `stop_recording()` -> `{ video_path, duration_sec }`.
 ///
-/// STUB: stops the session clock. The recorder will return the real file.
+/// Stops telemetry, finalizes the video file, and registers the session's
+/// telemetry in `SessionsState` so `analyze_moments(session_id)` works.
 #[tauri::command]
-fn stop_recording(sessions: tauri::State<SessionState>) -> Result<StopInfo, String> {
-    let mut guard = sessions.lock().map_err(|e| e.to_string())?;
-    let session = guard.take().ok_or("no active recording session")?;
+async fn stop_recording(
+    sessions: tauri::State<SessionState>,
+    telemetry: tauri::State<TelemetryState>,
+    store: tauri::State<SessionsState>,
+) -> Result<StopInfo, String> {
+    let mut session = {
+        let mut guard = sessions.lock().map_err(|e| e.to_string())?;
+        guard.take().ok_or("no active recording session")?
+    };
     session.ticking.store(false, Ordering::Relaxed);
-    let duration_sec = session.started_at.elapsed().as_secs_f64();
+
+    // Snapshot telemetry before stopping capture.
+    let (events, trail) = {
+        let t = telemetry.lock().map_err(|e| e.to_string())?;
+        t.stop();
+        (t.events(), t.trail())
+    };
+
+    // Finalize the video (blocking encode flush on a worker thread).
+    let capture = session
+        .capture
+        .take()
+        .ok_or("capture session already stopped")?;
+    let summary = tauri::async_runtime::spawn_blocking(move || capture.stop())
+        .await
+        .map_err(|e| format!("stop task panicked: {e}"))?
+        .map_err(|e| e.to_string())?;
+
+    // Register for analyze_moments.
+    {
+        let mut s = store.lock().map_err(|e| e.to_string())?;
+        s.insert(
+            summary.session_id.clone(),
+            flickcut_moments::SessionData {
+                session_id: summary.session_id.clone(),
+                events,
+                trail,
+                screen_size: Some((summary.width as f64, summary.height as f64)),
+            },
+        );
+    }
+
     Ok(StopInfo {
-        video_path: String::new(), // filled by the recorder module
-        duration_sec,
+        video_path: summary.video_path.to_string_lossy().into_owned(),
+        duration_sec: summary.duration_sec,
     })
 }
 
@@ -473,3 +545,4 @@ mod tests {
         assert_eq!(payload["percent"], 42);
     }
 }
+

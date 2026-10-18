@@ -40,6 +40,12 @@ impl SessionClock {
         self.t0_wall
     }
 
+    /// The monotonic instant of session start, for sharing with subsystems
+    /// that take a `std::time::Instant` epoch (e.g. input telemetry).
+    pub fn t0_instant(&self) -> Instant {
+        self.t0_mono
+    }
+
     /// Seconds since session start (monotonic).
     pub fn elapsed_sec(&self) -> f64 {
         self.t0_mono.elapsed().as_secs_f64()
@@ -99,3 +105,4 @@ mod tests {
         assert!((c.t0_wall() - wall_now()).abs() < 1.0);
     }
 }
+
