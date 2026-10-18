@@ -6,12 +6,27 @@
   },
   "windows": [
    {
-    "height": 800,
-    "minHeight": 640,
-    "minWidth": 1024,
-    "resizable": true,
+    "label": "main",
     "title": "FlickCut",
-    "width": 1280
+    "width": 1280,
+    "height": 800,
+    "minWidth": 960,
+    "minHeight": 600,
+    "visible": false
+   },
+   {
+    "label": "control-bar",
+    "title": "FlickCut",
+    "width": 430,
+    "height": 72,
+    "decorations": false,
+    "transparent": true,
+    "alwaysOnTop": true,
+    "skipTaskbar": true,
+    "resizable": false,
+    "maximizable": false,
+    "minimizable": false,
+    "focus": false
    }
   ]
  },
