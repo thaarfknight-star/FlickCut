@@ -36,6 +36,5 @@ The normative contract is `docs/ipc-contract-v1.md` on main (frozen).
 `src/ipc/tauriApi.ts` is the only module components import — real
 `invoke`/`listen` inside Tauri, mock backend in the browser.
 
-Note: pause/resume is **not** in contract v1 — the buttons work in the
-mock, but the shell needs a v1.1 decision (`pause_recording` /
-`resume_recording`).
+Note: pause/resume are contract **v1.1** (`pause_recording` /
+`resume_recording`) — the shell implements them, the mock mirrors the shapes.

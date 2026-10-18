@@ -11,6 +11,10 @@
  *   render_video(video_path, regions) -> { output_path }
  *   import_video(path) -> { session_id }
  *
+ * v1.1 addition (pause support, for the floating control bar):
+ *   pause_recording() -> { paused_at_sec }
+ *   resume_recording() -> { resumed_at_sec }
+ *
  * 3 events (Rust -> frontend via `listen`):
  *   flickcut://recording-tick  { elapsed_sec }
  *   flickcut://render-progress  { percent }
@@ -27,6 +31,8 @@ export const COMMANDS = {
   ANALYZE_MOMENTS: "analyze_moments",
   RENDER_VIDEO: "render_video",
   IMPORT_VIDEO: "import_video",
+  PAUSE_RECORDING: "pause_recording",
+  RESUME_RECORDING: "resume_recording",
 } as const;
 
 export const EVENTS = {

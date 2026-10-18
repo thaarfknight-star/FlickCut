@@ -100,22 +100,14 @@ export const importVideo = (path: string): Promise<{ session_id: string }> =>
   invoke(COMMANDS.IMPORT_VIDEO, { path });
 
 /**
- * Pause/resume are NOT in contract v1 (frozen). Works in mock mode;
- * in the real shell this throws until DEVagent adds the commands (v1.1).
+ * v1.1: pause/resume the active recording session.
+ * The shell (TAgent5) implements these; the mock mirrors the shapes.
  */
-export const pauseRecording = (): Promise<void> =>
-  inTauri
-    ? Promise.reject(
-        new Error("pause_recording is not in IPC contract v1")
-      )
-    : mockInvoke<void>("pause_recording_mock");
+export const pauseRecording = (): Promise<{ paused_at_sec: number }> =>
+  invoke(COMMANDS.PAUSE_RECORDING);
 
-export const resumeRecording = (): Promise<void> =>
-  inTauri
-    ? Promise.reject(
-        new Error("resume_recording is not in IPC contract v1")
-      )
-    : mockInvoke<void>("resume_recording_mock");
+export const resumeRecording = (): Promise<{ resumed_at_sec: number }> =>
+  invoke(COMMANDS.RESUME_RECORDING);
 
 /* -- events ------------------------------------------------------ */
 
