@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Taha Arefi
 //! Session clock: the single time base for a recording session.
 //!
 //! Owned by the capture module. The input-telemetry module (TAgent1) syncs to

@@ -2,7 +2,7 @@
 name = "flickcut-capture"
 version = "0.1.0"
 edition = "2021"
-description = "FlickCut Tauri v2 capture module: native screen capture via scap, session clock, ffmpeg encoding"
+description = "FlickCut Tauri v2 capture module: native per-platform screen capture, session clock, ffmpeg encoding"
 license = "AGPL-3.0-only"
 
 [lib]
@@ -14,5 +14,15 @@ name = "flickcut-harness"
 path = "src/bin/harness.rs"
 
 [dependencies]
-scap = "0.0.8"
 crossbeam-channel = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+windows-capture = "2.0.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = "11"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = "0.10"
+pipewire = "0.8"
+tokio = { version = "1", features = ["rt", "time", "net"] }

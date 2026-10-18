@@ -1,40 +1,39 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Taha Arefi
 //! Recording sessions (`start_recording` / `stop_recording`).
 //!
-//! One background worker thread runs the scap capture loop and pipes raw
-//! BGRA frames straight into an `ffmpeg` subprocess that encodes MP4
-//! (libx264). Stopping is cooperative via an atomic flag; `stop()` joins the
-//! worker with a timeout and kills the encoder as a last resort so the UI
-//! thread can never hang.
+//! The platform [`Backend`] pushes BGRA frames into a channel; one worker
+//! thread drains it into an `ffmpeg` subprocess that encodes MP4 (libx264).
+//! Stopping is cooperative: the backend is stopped, the worker is joined with
+//! a timeout, and the encoder is killed as a last resort so callers never hang.
 //!
 //! The session clock ([`crate::clock::SessionClock`]) is owned by the
 //! [`Session`] and shared (via [`Session::clock`]) with input telemetry so
 //! kill moments line up with video frames.
 
+use crate::backends::{create_backend, Backend};
 use crate::clock::SessionClock;
-use crate::sources::{resolve_target, ResolvedTarget};
+use crate::frame::Frame;
+use crossbeam_channel::Receiver;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 /// Errors from the capture pipeline.
 #[derive(Debug)]
 pub enum CaptureError {
-    /// Platform not supported by scap (e.g. missing OS API).
+    /// Platform backend cannot run here (e.g. missing OS API).
     UnsupportedPlatform(String),
     /// OS did not grant screen-recording permission.
     NoPermission,
     /// No such source id (see [`crate::sources::list_sources`]).
     UnknownSource(String),
-    /// scap failed to build or run the capturer.
+    /// The backend failed to build or run the capturer.
     CaptureFailed(String),
     /// The ffmpeg encoder subprocess failed.
     EncoderFailed(String),
-    /// A recording is already in progress on this handle.
-    AlreadyRecording,
 }
 
 impl std::fmt::Display for CaptureError {
@@ -45,7 +44,6 @@ impl std::fmt::Display for CaptureError {
             Self::UnknownSource(id) => write!(f, "unknown source: {id}"),
             Self::CaptureFailed(s) => write!(f, "capture failed: {s}"),
             Self::EncoderFailed(s) => write!(f, "encoder failed: {s}"),
-            Self::AlreadyRecording => write!(f, "already recording"),
         }
     }
 }
@@ -66,22 +64,25 @@ pub struct RecordingSummary {
     pub fps_target: u32,
 }
 
-struct WorkerOutcome {
-    frames: u64,
-    error: Option<String>,
-}
-
 /// An active recording session. Owns the session clock.
 pub struct Session {
     id: String,
     clock: SessionClock,
     output_path: PathBuf,
     fps: u32,
-    width: u32,
-    height: u32,
-    stop_flag: Arc<AtomicBool>,
+    backend: Box<dyn Backend>,
     worker: Option<JoinHandle<WorkerOutcome>>,
     encoder: Option<Child>,
+    width: u32,
+    height: u32,
+}
+
+struct WorkerOutcome {
+    frames_written: u64,
+    frames_dropped: u64,
+    width: u32,
+    height: u32,
+    error: Option<String>,
 }
 
 impl Session {
@@ -91,70 +92,37 @@ impl Session {
     /// The session clock starts now; share [`Session::clock`] with input
     /// telemetry before the first event is stamped.
     pub fn start(source_id: &str, fps: u32, output_path: &Path) -> Result<Self, CaptureError> {
-        if !scap::is_supported() {
-            return Err(CaptureError::UnsupportedPlatform(
-                "scap reports this platform is not supported".into(),
-            ));
-        }
-        if !scap::has_permission() {
-            return Err(CaptureError::NoPermission);
-        }
-        let target =
-            resolve_target(source_id).ok_or_else(|| CaptureError::UnknownSource(source_id.into()))?;
-        // Linux portal flow: target None -> the OS picker appears at capture start.
-        #[allow(unused_mut)]
-        let mut scap_target: Option<scap::Target> = match target {
-            ResolvedTarget::Scap(t) => Some(t),
-            #[cfg(target_os = "linux")]
-            ResolvedTarget::PortalPicker => None,
-        };
+        let mut backend = create_backend();
+        let frames_rx = backend.start(source_id, fps)?;
 
-        let options = scap::capturer::Options {
-            fps,
-            show_cursor: true,
-            show_highlight: false,
-            target: scap_target.take(),
-            output_type: scap::frame::FrameType::BGRAFrame,
-            ..Default::default()
-        };
-        // scap panics (instead of returning Err) when the platform backend
-        // cannot even initialize — e.g. no D-Bus/portal session on Linux.
-        // Catch it here so a Tauri command fails cleanly instead of
-        // crashing the backend thread. The panic hook is silenced during
-        // the build so users see our error, not scap's internals.
-        let prev_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let build_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            scap::capturer::Capturer::build(options)
-        }));
-        std::panic::set_hook(prev_hook);
-        let mut capturer = match build_result {
-            Ok(Ok(c)) => c,
-            Ok(Err(e)) => {
-                return Err(CaptureError::CaptureFailed(format!("{e:?}")));
-            }
-            Err(_) => {
-                return Err(CaptureError::CaptureFailed(
-                    "scap panicked during setup (no D-Bus/portal session?)".into(),
-                ));
-            }
-        };
-        let [w, h] = capturer.get_output_frame_size();
+        // Wait for the first frame to learn the real dimensions before
+        // spawning the encoder. Generous timeout: on Linux the OS picker
+        // needs human interaction; cancellation fails fast via channel close.
+        let first = frames_rx
+            .recv_timeout(Duration::from_secs(120))
+            .map_err(|_| {
+                backend.stop();
+                CaptureError::CaptureFailed(
+                    "no frames arrived (source picker cancelled or backend failed)".into(),
+                )
+            })?;
+        let (w, h) = (first.width, first.height);
 
-        let mut encoder = spawn_encoder(output_path, w, h, fps).map_err(CaptureError::EncoderFailed)?;
+        let mut encoder =
+            spawn_encoder(output_path, w, h, fps).map_err(CaptureError::EncoderFailed)?;
         let stdin = encoder
             .stdin
             .take()
             .ok_or_else(|| CaptureError::EncoderFailed("could not open encoder stdin".into()))?;
 
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        let flag = stop_flag.clone();
         let clock = SessionClock::new();
         let id = format!("sess-{}", (clock.t0_wall() * 1000.0) as u64);
 
+        // Move the receiver into the worker: a single consumer, so no frame
+        // is ever routed to a dead receiver.
         let worker = thread::Builder::new()
-            .name("flickcut-capture".into())
-            .spawn(move || run_worker(&mut capturer, stdin, flag))
+            .name("flickcut-encode".into())
+            .spawn(move || run_worker(frames_rx, stdin, first))
             .map_err(|e| CaptureError::CaptureFailed(format!("spawn worker: {e}")))?;
 
         Ok(Self {
@@ -162,11 +130,11 @@ impl Session {
             clock,
             output_path: output_path.to_path_buf(),
             fps,
-            width: w,
-            height: h,
-            stop_flag,
+            backend,
             worker: Some(worker),
             encoder: Some(encoder),
+            width: w,
+            height: h,
         })
     }
 
@@ -183,13 +151,15 @@ impl Session {
 
     /// Stop recording and finalize the video file.
     ///
-    /// Always returns (never hangs): the worker is joined with a timeout and
-    /// the encoder is killed as a last resort.
+    /// Always returns (never hangs): the backend is stopped, the worker is
+    /// joined with a timeout, and the encoder is killed as a last resort.
     pub fn stop(mut self) -> Result<RecordingSummary, CaptureError> {
-        self.stop_flag.store(true, Ordering::SeqCst);
+        // 1. Stop the backend → its worker exits → frame channel closes.
+        self.backend.stop();
+
+        // 2. Join the encoder worker (it exits on channel close / stdin EOF).
         let outcome = match self.worker.take() {
             Some(h) => {
-                // Cooperative stop first; the worker exits between frames.
                 let (tx, rx) = std::sync::mpsc::channel();
                 thread::spawn(move || {
                     let _ = tx.send(h.join());
@@ -197,34 +167,38 @@ impl Session {
                 match rx.recv_timeout(Duration::from_secs(5)) {
                     Ok(Ok(o)) => o,
                     Ok(Err(_)) => WorkerOutcome {
-                        frames: 0,
-                        error: Some("capture thread panicked".into()),
+                        frames_written: 0,
+                        frames_dropped: 0,
+                        width: self.width,
+                        height: self.height,
+                        error: Some("encoder thread panicked".into()),
                     },
                     Err(_) => {
-                        // Worker stuck (e.g. blocked in recv with a frozen
-                        // source). Kill the encoder so nothing hangs; the
-                        // orphan thread exits on the next frame.
                         if let Some(mut enc) = self.encoder.take() {
                             let _ = enc.kill();
                             let _ = enc.wait();
                         }
                         WorkerOutcome {
-                            frames: 0,
-                            error: Some("capture thread did not stop in time".into()),
+                            frames_written: 0,
+                            frames_dropped: 0,
+                            width: self.width,
+                            height: self.height,
+                            error: Some("encoder thread did not stop in time".into()),
                         }
                     }
                 }
             }
             None => WorkerOutcome {
-                frames: 0,
+                frames_written: 0,
+                frames_dropped: 0,
+                width: self.width,
+                height: self.height,
                 error: Some("no worker thread".into()),
             },
         };
 
-        // Normal path: close stdin (EOF) and wait for the encoder to finish
-        // writing the MP4.
+        // 3. Wait for ffmpeg to finalize the MP4.
         if let Some(mut enc) = self.encoder.take() {
-            // stdin was moved into the worker and dropped there on exit.
             match enc.wait() {
                 Ok(status) if status.success() => {}
                 Ok(status) => {
@@ -239,16 +213,15 @@ impl Session {
             return Err(CaptureError::CaptureFailed(e));
         }
 
-        let duration_sec = self.clock.elapsed_sec();
         Ok(RecordingSummary {
             session_id: self.id.clone(),
             video_path: self.output_path.clone(),
-            duration_sec,
-            frames_captured: outcome.frames,
-            frames_written: outcome.frames,
-            frames_dropped: 0,
-            width: self.width,
-            height: self.height,
+            duration_sec: self.clock.elapsed_sec(),
+            frames_captured: outcome.frames_written + outcome.frames_dropped,
+            frames_written: outcome.frames_written,
+            frames_dropped: outcome.frames_dropped,
+            width: outcome.width,
+            height: outcome.height,
             fps_target: self.fps,
         })
     }
@@ -257,7 +230,7 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         // Never leave a session recording on drop: best-effort stop.
-        self.stop_flag.store(true, Ordering::SeqCst);
+        self.backend.stop();
         if let Some(mut enc) = self.encoder.take() {
             let _ = enc.kill();
         }
@@ -298,48 +271,59 @@ fn spawn_encoder(output: &Path, w: u32, h: u32, fps: u32) -> Result<Child, Strin
         .map_err(|e| format!("spawn ffmpeg: {e} (is ffmpeg installed?)"))
 }
 
-/// The worker: pull frames from scap, stamp them, feed the encoder.
-fn run_worker(
-    capturer: &mut scap::capturer::Capturer,
-    mut stdin: ChildStdin,
-    stop: Arc<AtomicBool>,
-) -> WorkerOutcome {
-    capturer.start_capture();
-    let mut frames: u64 = 0;
+/// Worker: drain backend frames (first frame passed in) into ffmpeg stdin.
+fn run_worker(rx: Receiver<Frame>, mut stdin: ChildStdin, first: Frame) -> WorkerOutcome {
+    let mut frames_written: u64 = 0;
+    let mut frames_dropped: u64 = 0;
     let mut error: Option<String> = None;
+    let (mut w, mut h) = (first.width, first.height);
 
+    // The backend channel is bounded with try_send → overflow counts as drops.
+    // Here we count a drop when a frame arrives with unexpected dimensions.
+    let mut pending: Option<Frame> = Some(first);
     loop {
-        if stop.load(Ordering::SeqCst) {
+        let frame = match pending.take() {
+            Some(f) => f,
+            None => match rx.recv() {
+                Ok(f) => f,
+                Err(_) => break, // backend stopped → channel closed
+            },
+        };
+        if frame.width != w || frame.height != h {
+            // Mid-stream resize: keep the encoder's dimensions, drop the frame.
+            frames_dropped += 1;
+            continue;
+        }
+        if frame.data.len() != w as usize * h as usize * 4 {
+            frames_dropped += 1;
+            continue;
+        }
+        if stdin.write_all(&frame.data).is_err() {
+            error = Some("encoder stdin closed".into());
             break;
         }
-        match capturer.get_next_frame() {
-            Ok(scap::frame::Frame::BGRA(frame)) => {
-                if stdin.write_all(&frame.data).is_err() {
-                    error = Some("encoder stdin closed".into());
-                    break;
-                }
-                frames += 1;
-            }
-            Ok(_) => {
-                // Non-BGRA frame (shouldn't happen; we requested BGRA).
-                continue;
-            }
-            Err(_) => break, // channel disconnected
-        }
+        frames_written += 1;
+        let _ = (w, h);
     }
 
-    capturer.stop_capture();
-    drop(stdin); // EOF -> ffmpeg finalizes the file
-    WorkerOutcome { frames, error }
+    drop(stdin); // EOF → ffmpeg finalizes the file
+    WorkerOutcome {
+        frames_written,
+        frames_dropped,
+        width: w,
+        height: h,
+        error,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn unknown_source_is_rejected() {
-        let r = Session::start("screen:999999", 60, Path::new("/tmp/nope.mp4"));
+        let r = Session::start("bogus:999", 60, Path::new("/tmp/nope.mp4"));
         assert!(matches!(r, Err(CaptureError::UnknownSource(_))));
     }
 
