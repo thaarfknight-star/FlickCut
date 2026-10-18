@@ -152,7 +152,23 @@ struct ActiveSession {
     id: String,
     source_id: String,
     started_at: Instant,
+    /// Total time spent paused (excluded from `elapsed`).
+    paused_total: Duration,
+    /// Set while paused; the tick thread freezes and `elapsed` stops.
+    pause_started: Option<Instant>,
     ticking: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+}
+
+impl ActiveSession {
+    /// Recording time excluding paused intervals.
+    fn elapsed(&self) -> Duration {
+        let mut e = self.started_at.elapsed().saturating_sub(self.paused_total);
+        if let Some(ps) = self.pause_started {
+            e = e.saturating_sub(ps.elapsed());
+        }
+        e
+    }
 }
 
 /// The active recording session, if any.
@@ -172,6 +188,16 @@ struct StopInfo {
 #[derive(Debug, Clone, Serialize)]
 struct RecordingTick {
     elapsed_sec: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PauseInfo {
+    paused_at_sec: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ResumeInfo {
+    resumed_at_sec: f64,
 }
 
 fn now_millis() -> u128 {
@@ -200,22 +226,36 @@ fn start_recording(
     let id = format!("sess-{}", now_millis());
     let started_at = Instant::now();
     let ticking = Arc::new(AtomicBool::new(true));
+    let paused = Arc::new(AtomicBool::new(false));
 
+    // Tick thread: emits `flickcut://recording-tick` whenever the elapsed
+    // whole second changes. Freezes while paused (no ticks, timer held).
     let tick_flag = ticking.clone();
+    let paused_flag = paused.clone();
+    let sessions_tick: SessionState = sessions.inner().clone();
+    let app_tick = app.clone();
     std::thread::spawn(move || {
+        let mut last_sec = u64::MAX;
         while tick_flag.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(Duration::from_millis(200));
             if !tick_flag.load(Ordering::Relaxed) {
                 break;
             }
-            let elapsed = started_at.elapsed().as_secs();
-            app.emit(
-                "flickcut://recording-tick",
-                RecordingTick {
-                    elapsed_sec: elapsed,
-                },
-            )
-            .ok();
+            if paused_flag.load(Ordering::Relaxed) {
+                continue;
+            }
+            let sec = sessions_tick
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|s| s.elapsed().as_secs()));
+            if let Some(sec) = sec {
+                if sec != last_sec {
+                    last_sec = sec;
+                    app_tick
+                        .emit("flickcut://recording-tick", RecordingTick { elapsed_sec: sec })
+                        .ok();
+                }
+            }
         }
     });
 
@@ -223,7 +263,10 @@ fn start_recording(
         id: id.clone(),
         source_id,
         started_at,
+        paused_total: Duration::ZERO,
+        pause_started: None,
         ticking,
+        paused,
     });
     // NOTE: the input telemetry epoch should come from the session clock
     // (open item carried over from the input crate wiring).
@@ -233,15 +276,65 @@ fn start_recording(
 /// Contract: `stop_recording()` -> `{ video_path, duration_sec }`.
 ///
 /// STUB: stops the session clock. The recorder will return the real file.
+/// Shell choreography (WINDOWS_SPEC.md): reveals the editor window.
 #[tauri::command]
-fn stop_recording(sessions: tauri::State<SessionState>) -> Result<StopInfo, String> {
+fn stop_recording(
+    app: tauri::AppHandle,
+    sessions: tauri::State<SessionState>,
+) -> Result<StopInfo, String> {
     let mut guard = sessions.lock().map_err(|e| e.to_string())?;
     let session = guard.take().ok_or("no active recording session")?;
     session.ticking.store(false, Ordering::Relaxed);
-    let duration_sec = session.started_at.elapsed().as_secs_f64();
+    let duration_sec = session.elapsed().as_secs_f64();
+    drop(guard);
+    // Reveal the editor; the control bar stays visible (always-on-top).
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.set_focus();
+    }
     Ok(StopInfo {
         video_path: String::new(), // filled by the recorder module
         duration_sec,
+    })
+}
+
+/// Contract v1.1: `pause_recording()` -> `{ paused_at_sec }`.
+///
+/// Freezes the session timer (and capture, once the recorder plugs in);
+/// the session stays open. Errors when nothing is recording or when
+/// already paused.
+#[tauri::command]
+fn pause_recording(
+    sessions: tauri::State<SessionState>,
+) -> Result<PauseInfo, String> {
+    let mut guard = sessions.lock().map_err(|e| e.to_string())?;
+    let s = guard.as_mut().ok_or("no active recording session")?;
+    if s.pause_started.is_some() {
+        return Err("recording is already paused".into());
+    }
+    let paused_at_sec = s.elapsed().as_secs_f64();
+    s.pause_started = Some(Instant::now());
+    s.paused.store(true, Ordering::Relaxed);
+    // NOTE: TAgent's recorder must freeze capture here too (v1.1).
+    Ok(PauseInfo { paused_at_sec })
+}
+
+/// Contract v1.1: `resume_recording()` -> `{ resumed_at_sec }`.
+///
+/// Resumes a paused session; paused time is excluded from the session
+/// clock. Errors when nothing is recording or when not paused.
+#[tauri::command]
+fn resume_recording(
+    sessions: tauri::State<SessionState>,
+) -> Result<ResumeInfo, String> {
+    let mut guard = sessions.lock().map_err(|e| e.to_string())?;
+    let s = guard.as_mut().ok_or("no active recording session")?;
+    let ps = s.pause_started.take().ok_or("recording is not paused")?;
+    s.paused_total += ps.elapsed();
+    s.paused.store(false, Ordering::Relaxed);
+    // NOTE: TAgent's recorder must resume capture here too (v1.1).
+    Ok(ResumeInfo {
+        resumed_at_sec: s.elapsed().as_secs_f64(),
     })
 }
 
@@ -396,6 +489,24 @@ fn main() {
             )));
             // Shell-owned recording session (stub until the recorder lands).
             app.manage(SessionState::default());
+
+            // Floating control bar (WINDOWS_SPEC.md, Recordly-style):
+            // bottom-center of the primary monitor. The editor (`main`)
+            // starts hidden (`visible: false` in tauri.conf.json).
+            if let Some(bar) = app.get_webview_window("control-bar") {
+                if let Ok(Some(monitor)) = app.primary_monitor() {
+                    let size = monitor.size();
+                    let scale = monitor.scale_factor();
+                    let bar_w = (430.0 * scale) as i32;
+                    let bar_h = (72.0 * scale) as i32;
+                    let x = (size.width as i32 - bar_w) / 2;
+                    let y = size.height as i32 - bar_h - (24.0 * scale) as i32;
+                    let _ = bar.set_position(tauri::Position::Physical(
+                        tauri::PhysicalPosition { x, y },
+                    ));
+                }
+                let _ = bar.show();
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -409,6 +520,8 @@ fn main() {
             list_sources,
             start_recording,
             stop_recording,
+            pause_recording,
+            resume_recording,
             import_video,
         ])
         .run(tauri::generate_context!())
@@ -471,5 +584,34 @@ mod tests {
         // ipc-contract-v1.md: flickcut://render-progress, { percent: 0-100 }
         let payload = serde_json::json!({ "percent": 42u8 });
         assert_eq!(payload["percent"], 42);
+    }
+
+    fn test_session(paused_total: Duration, pause_started: Option<Instant>) -> ActiveSession {
+        ActiveSession {
+            id: "t".into(),
+            source_id: "s".into(),
+            started_at: Instant::now() - Duration::from_secs(10),
+            paused_total,
+            pause_started,
+            ticking: Arc::new(AtomicBool::new(true)),
+            paused: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[test]
+    fn elapsed_excludes_paused_total() {
+        let s = test_session(Duration::from_secs(3), None);
+        let e = s.elapsed().as_secs_f64();
+        assert!((6.0..=8.0).contains(&e), "elapsed was {e}");
+    }
+
+    #[test]
+    fn elapsed_excludes_ongoing_pause() {
+        let s = test_session(
+            Duration::from_secs(2),
+            Some(Instant::now() - Duration::from_secs(2)),
+        );
+        let e = s.elapsed().as_secs_f64();
+        assert!((5.0..=7.0).contains(&e), "elapsed was {e}");
     }
 }

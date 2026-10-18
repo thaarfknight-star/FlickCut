@@ -1,11 +1,14 @@
 {
-  "$schema": "https://schema.tauri.app/config/2",
-  "description": "Default FlickCut shell permissions",
-  "identifier": "default",
-  "permissions": [
-    "core:default"
-  ],
-  "windows": [
-    "main"
-  ]
+ "identifier": "default",
+ "description": "Default permissions for the FlickCut app.",
+ "windows": [
+  "main",
+  "control-bar"
+ ],
+ "permissions": [
+  "core:default",
+  "core:window:allow-show",
+  "core:window:allow-hide",
+  "core:window:allow-set-focus"
+ ]
 }
