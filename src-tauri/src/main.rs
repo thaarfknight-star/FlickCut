@@ -4,12 +4,12 @@
 //!
 //! Registers the frozen IPC contract v1 (`docs/ipc-contract-v1.md`):
 //! 6 frontend commands + 3 frontend events.
-//!   - list_sources    -> real (xcap enumeration; team decision 2026-10-18:
-//!                        `scap` is unmaintained, do not use)
+//!   - list_sources    -> real (flickcut-capture backend enumeration)
 //!   - analyze_moments -> real (flickcut-moments crate)
 //!   - render_video    -> real (flickcut-render crate + ffmpeg sidecar)
-//!   - start/stop_recording, import_video -> STUBS owned by the shell
-//!     (session clock + tick events); TAgent's recorder plugs capture in.
+//!   - start/stop_recording -> real (flickcut-capture Session + shared
+//!     session clock; input telemetry starts on the same epoch)
+//!   - import_video    -> STUB (session id only, no telemetry)
 //!
 //! The 4 internal `input_*` commands belong to the flickcut-input crate
 //! (testing/debugging) and are not part of the frontend contract.
@@ -36,9 +36,9 @@ type SessionsState = Arc<Mutex<flickcut_moments::SessionStore>>;
 
 #[tauri::command]
 fn input_start(state: tauri::State<TelemetryState>) -> Result<(), String> {
-    // NOTE: the epoch should come from the recording session clock
-    // (TAgent's session module). Until that wiring lands, each start
-    // creates its own epoch.
+    // NOTE: during a recording, start_recording() starts telemetry on the
+    // shared session-clock epoch. This command is for manual/testing use and
+    // is idempotent (a running telemetry keeps its epoch).
     let mut t = state.lock().map_err(|e| e.to_string())?;
     t.start(std::time::Instant::now());
     Ok(())
@@ -108,67 +108,48 @@ struct SourceList {
 
 /// Contract: `list_sources()` -> `{ screens: [{id, name}], windows: [{id, title}] }`.
 ///
-/// Real implementation via xcap. Minimized windows (no capturable surface)
-/// and untitled helper windows are filtered out of the picker.
+/// Real implementation via the flickcut-capture backend enumeration, so the
+/// returned ids are exactly what `start_recording(source_id)` accepts.
 #[tauri::command]
 fn list_sources() -> Result<SourceList, String> {
-    let mut screens = Vec::new();
-    for monitor in xcap::Monitor::all().map_err(|e| e.to_string())? {
-        let id = monitor.id().map_err(|e| e.to_string())?;
-        let name = monitor
-            .name()
-            .unwrap_or_else(|_| format!("Display {}", id));
-        screens.push(ScreenInfo {
-            id: id.to_string(),
-            name,
-        });
-    }
-    let mut windows = Vec::new();
-    for window in xcap::Window::all().map_err(|e| e.to_string())? {
-        if window.is_minimized().unwrap_or(false) {
-            continue;
-        }
-        let title = window.title().unwrap_or_default();
-        if title.trim().is_empty() {
-            continue;
-        }
-        let id = window.id().map_err(|e| e.to_string())?;
-        windows.push(WindowInfo {
-            id: id.to_string(),
-            title,
-        });
-    }
-    Ok(SourceList { screens, windows })
+    let list = flickcut_capture::list_sources();
+    Ok(SourceList {
+        screens: list
+            .screens
+            .into_iter()
+            .map(|s| ScreenInfo {
+                id: s.id,
+                name: s.name,
+            })
+            .collect(),
+        windows: list
+            .windows
+            .into_iter()
+            .map(|s| WindowInfo {
+                id: s.id,
+                title: s.name,
+            })
+            .collect(),
+    })
 }
 
 // ---------------------------------------------------------------------------
-// start/stop_recording + import_video (IPC contract v1) — shell stubs
+// start/stop_recording + import_video (IPC contract v1) — real wiring
 // ---------------------------------------------------------------------------
 
-/// Shell-owned session record. `id`/`source_id` are read by TAgent's
-/// recorder module once it plugs in.
-#[allow(dead_code)]
+/// Capture frames per second for recordings.
+const RECORD_FPS: u32 = 60;
+
+/// Shell-owned session record. Holds the live capture session; `stop()`
+/// consumes it and finalizes the video file.
 struct ActiveSession {
-    id: String,
-    source_id: String,
-    started_at: Instant,
-    /// Total time spent paused (excluded from `elapsed`).
-    paused_total: Duration,
-    /// Set while paused; the tick thread freezes and `elapsed` stops.
-    pause_started: Option<Instant>,
+    capture: Option<flickcut_capture::Session>,
     ticking: Arc<AtomicBool>,
     paused: Arc<AtomicBool>,
-}
-
-impl ActiveSession {
-    /// Recording time excluding paused intervals.
-    fn elapsed(&self) -> Duration {
-        let mut e = self.started_at.elapsed().saturating_sub(self.paused_total);
-        if let Some(ps) = self.pause_started {
-            e = e.saturating_sub(ps.elapsed());
-        }
-        e
-    }
+    /// Total time spent paused (excluded from elapsed).
+    paused_total: Duration,
+    /// Set while paused; the tick thread freezes.
+    pause_started: Option<Instant>,
 }
 
 /// The active recording session, if any.
@@ -207,102 +188,162 @@ fn now_millis() -> u128 {
         .unwrap_or(0)
 }
 
+/// Where to write the recording: `<video_dir>/flickcut-<millis>.mp4`,
+/// falling back to the system temp dir.
+fn recording_output_path(app: &tauri::AppHandle) -> std::path::PathBuf {
+    let dir = app
+        .path()
+        .video_dir()
+        .unwrap_or_else(|_| std::env::temp_dir());
+    dir.join(format!("flickcut-{}.mp4", now_millis()))
+}
+
 /// Contract: `start_recording(source_id)` -> `{ session_id }`.
 /// Emits `flickcut://recording-tick` every second while recording.
 ///
-/// STUB: the shell owns the session clock and tick events so the UI works
-/// end-to-end. TAgent's recorder plugs capture + the real session clock in
-/// here (and fills `SessionsState` for `analyze_moments`).
+/// Real implementation: starts the flickcut-capture session (this blocks
+/// while the Linux portal picker waits for the user), then starts input
+/// telemetry on the SAME session-clock epoch so kill moments line up with
+/// video frames.
 #[tauri::command]
-fn start_recording(
+async fn start_recording(
     source_id: String,
     app: tauri::AppHandle,
     sessions: tauri::State<SessionState>,
+    telemetry: tauri::State<TelemetryState>,
 ) -> Result<SessionInfo, String> {
-    let mut guard = sessions.lock().map_err(|e| e.to_string())?;
-    if guard.is_some() {
-        return Err("a recording session is already active".into());
+    {
+        let guard = sessions.lock().map_err(|e| e.to_string())?;
+        if guard.is_some() {
+            return Err("a recording session is already active".into());
+        }
     }
-    let id = format!("sess-{}", now_millis());
-    let started_at = Instant::now();
+
+    let output_path = recording_output_path(&app);
+
+    // Blocking capture start on a worker thread (the portal picker needs
+    // user interaction and must not stall the Tauri runtime).
+    let capture = tauri::async_runtime::spawn_blocking(move || {
+        flickcut_capture::Session::start(&source_id, RECORD_FPS, &output_path)
+    })
+    .await
+    .map_err(|e| format!("capture task panicked: {e}"))?
+    .map_err(|e| e.to_string())?;
+
+    let session_id = capture.id().to_string();
+    let clock = capture.clock();
+
+    // Input telemetry on the shared session epoch. If telemetry was already
+    // running (e.g. a manual input_start), restart it so the epochs match.
+    {
+        let t = telemetry.lock().map_err(|e| e.to_string())?;
+        if t.running() {
+            t.stop();
+        }
+        t.clear();
+        t.start(clock.t0_instant());
+    }
+
+    // Tick events driven by the session clock.
     let ticking = Arc::new(AtomicBool::new(true));
     let paused = Arc::new(AtomicBool::new(false));
-
-    // Tick thread: emits `flickcut://recording-tick` whenever the elapsed
-    // whole second changes. Freezes while paused (no ticks, timer held).
     let tick_flag = ticking.clone();
-    let paused_flag = paused.clone();
-    let sessions_tick: SessionState = sessions.inner().clone();
-    let app_tick = app.clone();
+    let tick_paused = paused.clone();
+    let tick_clock = clock.clone();
+    let tick_app = app.clone();
     std::thread::spawn(move || {
-        let mut last_sec = u64::MAX;
         while tick_flag.load(Ordering::Relaxed) {
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(Duration::from_secs(1));
             if !tick_flag.load(Ordering::Relaxed) {
                 break;
             }
-            if paused_flag.load(Ordering::Relaxed) {
+            if tick_paused.load(Ordering::Relaxed) {
                 continue;
             }
-            let sec = sessions_tick
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().map(|s| s.elapsed().as_secs()));
-            if let Some(sec) = sec {
-                if sec != last_sec {
-                    last_sec = sec;
-                    app_tick
-                        .emit("flickcut://recording-tick", RecordingTick { elapsed_sec: sec })
-                        .ok();
-                }
-            }
+            let _ = tick_app.emit(
+                "flickcut://recording-tick",
+                RecordingTick {
+                    elapsed_sec: tick_clock.elapsed_sec() as u64,
+                },
+            );
         }
     });
 
-    *guard = Some(ActiveSession {
-        id: id.clone(),
-        source_id,
-        started_at,
-        paused_total: Duration::ZERO,
-        pause_started: None,
-        ticking,
-        paused,
-    });
-    // NOTE: the input telemetry epoch should come from the session clock
-    // (open item carried over from the input crate wiring).
-    Ok(SessionInfo { session_id: id })
+    {
+        let mut guard = sessions.lock().map_err(|e| e.to_string())?;
+        // Re-check: a concurrent start could have won while we blocked.
+        if guard.is_some() {
+            return Err("a recording session is already active".into());
+        }
+        *guard = Some(ActiveSession {
+            capture: Some(capture),
+            ticking,
+            paused,
+            paused_total: Duration::ZERO,
+            pause_started: None,
+        });
+    }
+
+    Ok(SessionInfo { session_id })
 }
 
 /// Contract: `stop_recording()` -> `{ video_path, duration_sec }`.
 ///
-/// STUB: stops the session clock. The recorder will return the real file.
-/// Shell choreography (WINDOWS_SPEC.md): reveals the editor window.
+/// Stops telemetry, finalizes the video file, and registers the session's
+/// telemetry in `SessionsState` so `analyze_moments(session_id)` works.
 #[tauri::command]
-fn stop_recording(
-    app: tauri::AppHandle,
+async fn stop_recording(
     sessions: tauri::State<SessionState>,
+    telemetry: tauri::State<TelemetryState>,
+    store: tauri::State<SessionsState>,
 ) -> Result<StopInfo, String> {
-    let mut guard = sessions.lock().map_err(|e| e.to_string())?;
-    let session = guard.take().ok_or("no active recording session")?;
+    let mut session = {
+        let mut guard = sessions.lock().map_err(|e| e.to_string())?;
+        guard.take().ok_or("no active recording session")?
+    };
     session.ticking.store(false, Ordering::Relaxed);
-    let duration_sec = session.elapsed().as_secs_f64();
-    drop(guard);
-    // Reveal the editor; the control bar stays visible (always-on-top).
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.show();
-        let _ = main.set_focus();
+
+    // Snapshot telemetry before stopping capture.
+    let (events, trail) = {
+        let t = telemetry.lock().map_err(|e| e.to_string())?;
+        t.stop();
+        (t.events(), t.trail())
+    };
+
+    // Finalize the video (blocking encode flush on a worker thread).
+    let capture = session
+        .capture
+        .take()
+        .ok_or("capture session already stopped")?;
+    let summary = tauri::async_runtime::spawn_blocking(move || capture.stop())
+        .await
+        .map_err(|e| format!("stop task panicked: {e}"))?
+        .map_err(|e| e.to_string())?;
+
+    // Register for analyze_moments.
+    {
+        let mut s = store.lock().map_err(|e| e.to_string())?;
+        s.insert(
+            summary.session_id.clone(),
+            flickcut_moments::SessionData {
+                session_id: summary.session_id.clone(),
+                events,
+                trail,
+                screen_size: Some((summary.width as f64, summary.height as f64)),
+            },
+        );
     }
+
     Ok(StopInfo {
-        video_path: String::new(), // filled by the recorder module
-        duration_sec,
+        video_path: summary.video_path.to_string_lossy().into_owned(),
+        duration_sec: summary.duration_sec,
     })
 }
 
-/// Contract v1.1: `pause_recording()` -> `{ paused_at_sec }`.
+/// Contract: `import_video(path)` -> `{ session_id }`.
 ///
-/// Freezes the session timer (and capture, once the recorder plugs in);
-/// the session stays open. Errors when nothing is recording or when
-/// already paused.
+/// STUB: imports an existing video file as a session (no telemetry).
+/// Contract v1.1: `pause_recording()` -> `{ paused_at_sec }`.
 #[tauri::command]
 fn pause_recording(
     sessions: tauri::State<SessionState>,
@@ -312,17 +353,18 @@ fn pause_recording(
     if s.pause_started.is_some() {
         return Err("recording is already paused".into());
     }
-    let paused_at_sec = s.elapsed().as_secs_f64();
+    let paused_at_sec = s
+        .capture
+        .as_ref()
+        .map(|c| c.clock().elapsed_sec())
+        .unwrap_or(0.0)
+        - s.paused_total.as_secs_f64();
     s.pause_started = Some(Instant::now());
     s.paused.store(true, Ordering::Relaxed);
-    // NOTE: TAgent's recorder must freeze capture here too (v1.1).
     Ok(PauseInfo { paused_at_sec })
 }
 
 /// Contract v1.1: `resume_recording()` -> `{ resumed_at_sec }`.
-///
-/// Resumes a paused session; paused time is excluded from the session
-/// clock. Errors when nothing is recording or when not paused.
 #[tauri::command]
 fn resume_recording(
     sessions: tauri::State<SessionState>,
@@ -332,15 +374,15 @@ fn resume_recording(
     let ps = s.pause_started.take().ok_or("recording is not paused")?;
     s.paused_total += ps.elapsed();
     s.paused.store(false, Ordering::Relaxed);
-    // NOTE: TAgent's recorder must resume capture here too (v1.1).
-    Ok(ResumeInfo {
-        resumed_at_sec: s.elapsed().as_secs_f64(),
-    })
+    let resumed_at_sec = s
+        .capture
+        .as_ref()
+        .map(|c| c.clock().elapsed_sec())
+        .unwrap_or(0.0)
+        - s.paused_total.as_secs_f64();
+    Ok(ResumeInfo { resumed_at_sec })
 }
 
-/// Contract: `import_video(path)` -> `{ session_id }`.
-///
-/// STUB: imports an existing video file as a session (no telemetry).
 #[tauri::command]
 fn import_video(path: String) -> Result<SessionInfo, String> {
     let _ = path;
@@ -489,24 +531,6 @@ fn main() {
             )));
             // Shell-owned recording session (stub until the recorder lands).
             app.manage(SessionState::default());
-
-            // Floating control bar (WINDOWS_SPEC.md, Recordly-style):
-            // bottom-center of the primary monitor. The editor (`main`)
-            // starts hidden (`visible: false` in tauri.conf.json).
-            if let Some(bar) = app.get_webview_window("control-bar") {
-                if let Ok(Some(monitor)) = app.primary_monitor() {
-                    let size = monitor.size();
-                    let scale = monitor.scale_factor();
-                    let bar_w = (430.0 * scale) as i32;
-                    let bar_h = (72.0 * scale) as i32;
-                    let x = (size.width as i32 - bar_w) / 2;
-                    let y = size.height as i32 - bar_h - (24.0 * scale) as i32;
-                    let _ = bar.set_position(tauri::Position::Physical(
-                        tauri::PhysicalPosition { x, y },
-                    ));
-                }
-                let _ = bar.show();
-            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -585,33 +609,5 @@ mod tests {
         let payload = serde_json::json!({ "percent": 42u8 });
         assert_eq!(payload["percent"], 42);
     }
-
-    fn test_session(paused_total: Duration, pause_started: Option<Instant>) -> ActiveSession {
-        ActiveSession {
-            id: "t".into(),
-            source_id: "s".into(),
-            started_at: Instant::now() - Duration::from_secs(10),
-            paused_total,
-            pause_started,
-            ticking: Arc::new(AtomicBool::new(true)),
-            paused: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    #[test]
-    fn elapsed_excludes_paused_total() {
-        let s = test_session(Duration::from_secs(3), None);
-        let e = s.elapsed().as_secs_f64();
-        assert!((6.0..=8.0).contains(&e), "elapsed was {e}");
-    }
-
-    #[test]
-    fn elapsed_excludes_ongoing_pause() {
-        let s = test_session(
-            Duration::from_secs(2),
-            Some(Instant::now() - Duration::from_secs(2)),
-        );
-        let e = s.elapsed().as_secs_f64();
-        assert!((5.0..=7.0).contains(&e), "elapsed was {e}");
-    }
 }
+
