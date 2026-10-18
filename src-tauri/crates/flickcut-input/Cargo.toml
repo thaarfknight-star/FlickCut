@@ -1,0 +1,15 @@
+[package]
+name = "flickcut-input"
+version = "0.1.0"
+edition = "2021"
+description = "Global mouse/keyboard/gamepad input telemetry for FlickCut"
+license = "AGPL-3.0-only"
+
+[dependencies]
+device_query = "1.1"
+rdev = "0.5"
+gilrs = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
