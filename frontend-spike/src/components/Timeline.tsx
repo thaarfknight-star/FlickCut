@@ -1,5 +1,6 @@
 import { MOMENT_COLORS, REGION_COLORS, THEME } from "../theme";
-import { DURATION, type Moment, type Region } from "../mockData";
+import { DURATION } from "../mockData";
+import type { Moment, Region } from "../ipc/tauriApi";
 
 interface Props {
   moments: Moment[];

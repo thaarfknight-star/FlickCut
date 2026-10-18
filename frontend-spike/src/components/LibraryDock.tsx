@@ -1,6 +1,6 @@
 import { MOMENT_COLORS, THEME } from "../theme";
-import { formatTime, type Moment, type Region } from "../mockData";
-import { describeRegion } from "../mockData";
+import { formatTime, describeRegion } from "../mockData";
+import type { Moment, Region } from "../ipc/tauriApi";
 
 interface Props {
   moments: Moment[];
