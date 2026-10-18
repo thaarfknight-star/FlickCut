@@ -12,12 +12,16 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 flickcut-input = { path = "crates/flickcut-input" }
 flickcut-moments = { path = "crates/flickcut-moments" }
+flickcut-render = { path = "crates/flickcut-render" }
+flickcut-capture = { path = "crates/flickcut-capture" }
 
 [features]
 default = [ "custom-protocol" ]
 custom-protocol = [ "tauri/custom-protocol" ]
+
 
