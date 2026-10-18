@@ -83,8 +83,24 @@ jobs:
       # src-tauri/binaries/ named <name>-<triple>[.exe]; resolve_ffmpeg()
       # in main.rs finds it next to the app binary.
       #
-      # All three builds are GPL with libx264 (AGPL-3.0 compatible).
+      # Third-party attribution (all GPL builds with libx264, AGPL-3.0
+      # compatible — see the spike report):
+      # - Windows: BtbN FFmpeg-Builds (https://github.com/BtbN/FFmpeg-Builds)
+      # - Linux:   johnvansickle static builds (https://johnvansickle.com/ffmpeg/)
+      # - macOS:   OSXExperts static builds (https://www.osxexperts.net/)
+      #
+      # Versions are PINNED (per TAgent5): review quarterly. Bump the
+      # cache key when changing versions.
+      - name: Cache ffmpeg sidecar
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/binaries/
+          key: ffmpeg-v1-${{ matrix.target }}
+          # v1 = BtbN ffmpeg 8.1 / johnvansickle release / osxexperts ffmpeg9arm
+
       - name: Download ffmpeg sidecar
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -92,15 +108,16 @@ jobs:
           TARGET="${{ matrix.target }}"
           case "${{ runner.os }}" in
             Windows)
-              # BtbN static GPL build (has libx264).
+              # BtbN ffmpeg 8.1 stable branch, GPL with libx264.
+              # Pinned to 8.1 (not rolling master) for reproducibility.
               curl -sSfL -o /tmp/ffmpeg.zip \
-                "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+                "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-8.1.zip"
               7z x /tmp/ffmpeg.zip -o/tmp/ff -y
-              cp /tmp/ff/ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe \
+              cp /tmp/ff/ffmpeg-n8.1-latest-win64-gpl-8.1/bin/ffmpeg.exe \
                  "src-tauri/binaries/ffmpeg-${TARGET}.exe"
               ;;
             Linux)
-              # johnvansickle static build (has libx264).
+              # johnvansickle release build, GPL with libx264.
               curl -sSfL -o /tmp/ffmpeg.tar.xz \
                 "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
               tar -xf /tmp/ffmpeg.tar.xz -C /tmp
@@ -109,9 +126,8 @@ jobs:
               chmod +x "src-tauri/binaries/ffmpeg-${TARGET}"
               ;;
             macOS)
-              # evermeet.cx static build (Intel; runs via Rosetta 2 on arm64).
-              # BtbN publishes no macOS builds. Has libx264.
-              curl -sSfL -o /tmp/ffmpeg.zip "https://evermeet.cx/ffmpeg/getrelease/zip"
+              # OSXExperts native ARM64 static build, GPL with libx264.
+              curl -sSfL -o /tmp/ffmpeg.zip "https://www.osxexperts.net/ffmpeg9arm.zip"
               unzip -o -q /tmp/ffmpeg.zip -d /tmp/ff
               cp /tmp/ff/ffmpeg "src-tauri/binaries/ffmpeg-${TARGET}"
               chmod +x "src-tauri/binaries/ffmpeg-${TARGET}"
@@ -119,7 +135,7 @@ jobs:
           esac
           echo "--- sidecar binaries ---"
           ls -lh src-tauri/binaries/
-          # Smoke-test: the binary runs and has libx264.
+          # Smoke-test: the binary runs and has the libx264 encoder.
           BIN="$(ls src-tauri/binaries/ffmpeg-* | head -1)"
           "$BIN" -hide_banner -h encoder=libx264 2>&1 | head -3
 
