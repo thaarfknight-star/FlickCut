@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/flickcut-input"]
+resolver = "2"
+
 [package]
 name = "flickcut"
 version = "0.1.0"
@@ -10,9 +14,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rdev = "0.5"
-device_query = "1.1"
-gilrs = "0.11"
+flickcut-input = { path = "crates/flickcut-input" }
 
 [features]
 default = [ "custom-protocol" ]
