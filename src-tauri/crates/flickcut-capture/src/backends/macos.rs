@@ -16,17 +16,16 @@ use crate::frame::Frame as FcFrame;
 use crate::recorder::CaptureError;
 use crate::sources::{SourceList, SourceRef};
 use crossbeam_channel::{bounded, Receiver, Sender};
-use screencapturekit::cm::sample_buffer::CMSampleBufferExt;
 use screencapturekit::cv::CVPixelBufferLockFlags;
 use screencapturekit::prelude::*;
 
 /// Extract tight BGRA bytes from a sample buffer.
 fn extract_bgra(sample: &CMSampleBuffer) -> Option<FcFrame> {
     let pb = sample.pixel_buffer()?;
-    let _guard = pb.lock(CVPixelBufferLockFlags::READ_ONLY).ok()?;
+    let guard = pb.lock(CVPixelBufferLockFlags::READ_ONLY).ok()?;
     let (w, h) = (pb.width(), pb.height());
     let stride = pb.bytes_per_row();
-    let base = pb.base_address();
+    let base = guard.base_address();
     if base.is_null() || w == 0 || h == 0 {
         return None;
     }
@@ -97,8 +96,8 @@ impl Backend for MacosBackend {
         // Build the content filter + stream configuration for the target.
         let (filter, (w, h)) = match kind {
             "screen" => {
-                let d = content
-                    .displays()
+                let displays = content.displays();
+                let d = displays
                     .get(idx)
                     .ok_or_else(|| CaptureError::UnknownSource(source_id.into()))?;
                 let filter = SCContentFilter::create()
@@ -109,8 +108,8 @@ impl Backend for MacosBackend {
                 (filter, (d.width(), d.height()))
             }
             "window" => {
-                let win = content
-                    .windows()
+                let windows = content.windows();
+                let win = windows
                     .get(idx)
                     .ok_or_else(|| CaptureError::UnknownSource(source_id.into()))?;
                 let filter = SCContentFilter::create()
@@ -118,8 +117,8 @@ impl Backend for MacosBackend {
                     .build()
                     .map_err(|e| CaptureError::CaptureFailed(format!("{e:?}")))?;
                 // Window size: fall back to the primary display size.
-                let (w, h) = content
-                    .displays()
+                let displays = content.displays();
+                let (w, h) = displays
                     .first()
                     .map(|d| (d.width(), d.height()))
                     .unwrap_or((1920, 1080));
@@ -163,4 +162,5 @@ impl Backend for MacosBackend {
         }
     }
 }
+
 
