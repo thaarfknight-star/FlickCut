@@ -1,18 +1,19 @@
 # FlickCut — first real builds (Tauri v2).
 #
-# Builds the app on all three desktop OSes. Green here = the first real
-# FlickCut installers. Runs on every push to main, on PRs, and on demand.
+# Builds installable artifacts on all three desktop OSes. Runs on every push
+# to main and on demand. Per Taha's order (2026-10-18): ship the pipeline
+# GREEN today with the current main (recording stubs) — do not wait for the
+# capture module; the second build comes after TAgent's capture merges.
 #
-# Signing is intentionally NOT configured yet (decision: deferred until the
-# public release). macOS builds are unsigned (Gatekeeper: right-click -> Open
-# on first launch), Windows builds are unsigned, and the updater signature
-# step is skipped until TAURI_SIGNING_PRIVATE_KEY exists as a repo secret.
+# Signing is skipped for these test builds: the updater artifacts step is
+# disabled via a CI config override (the real `createUpdaterArtifacts: true`
+# stays in tauri.conf.json for release builds). macOS/Windows builds are
+# unsigned until the pre-release signing ceremony.
 name: Build
 
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -50,28 +51,40 @@ jobs:
         run: |
           sudo apt-get update
           # Tauri v2 baseline + xcap (screen/window enumeration) system deps.
+          # Package list per TAgent's capture report.
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
-            pkg-config libclang-dev \
-            libxcb1-dev libxrandr-dev libdbus-1-dev \
-            libpipewire-0.3-dev libwayland-dev libegl-dev
+            pkg-config \
+            libclang-dev \
+            libpipewire-0.3-dev \
+            libgbm-dev \
+            libdrm-dev \
+            libegl-dev \
+            libwayland-dev \
+            libxcb1-dev \
+            libxcb-shm0-dev \
+            libxcb-randr0-dev \
+            libxrandr-dev \
+            libdbus-1-dev
 
       - name: Install frontend dependencies
         run: npm ci --prefix frontend-spike
+
+      # Test builds skip updater artifact signing (no key yet). The override
+      # deep-merges over tauri.conf.json; release builds keep artifacts on.
+      - name: Write CI config override
+        run: echo '{"bundle":{"createUpdaterArtifacts":false}}' > src-tauri/ci-override.json
 
       - name: Build with Tauri Action
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Empty until the signing ceremony happens (pre-release).
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         with:
           projectPath: src-tauri
-          args: --target ${{ matrix.target }}
-
+          args: --target ${{ matrix.target }} --config ci-override.json
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
