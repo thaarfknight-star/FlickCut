@@ -35,6 +35,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Cleanup old caches
+        # Temporarily disabled - was breaking builds (exit code 5)
+        # TODO: fix and re-enable
+        if: false
         # Keep only the most recent cache per key prefix; delete the rest
         # to stay within GitHub's cache quota. Runs on every build.
         env:
