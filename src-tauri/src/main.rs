@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 
+use serde::{Deserialize, Serialize};
+
 /// Shared input telemetry, started/stopped from Tauri commands.
 type TelemetryState = Arc<Mutex<flickcut_input::InputTelemetry>>;
 
@@ -63,6 +65,127 @@ struct AnalyzeMomentsResponse {
     markers: Vec<flickcut_moments::Marker>,
 }
 
+// ---------------------------------------------------------------------------
+// render_video (IPC contract v1)
+// ---------------------------------------------------------------------------
+
+/// Frontend `Region` DTO (ipc-contract-v1.md). The contract carries no focus
+/// point, so zoom regions default to frame center; if the contract gains
+/// x/y, map them via `Region::with_focus` in `dto_to_region`.
+#[derive(Debug, Deserialize)]
+struct RegionDto {
+    start: f64,
+    end: f64,
+    effect: String,
+    intensity: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct RenderVideoResponse {
+    output_path: String,
+}
+
+fn dto_to_region(dto: &RegionDto) -> Result<flickcut_render::Region, String> {
+    let effect = match dto.effect.as_str() {
+        "slowmo" => flickcut_render::Effect::SlowMo,
+        "curve" => flickcut_render::Effect::Curve,
+        "zoomin" => flickcut_render::Effect::ZoomIn,
+        "zoomout" => flickcut_render::Effect::ZoomOut,
+        other => return Err(format!("unknown effect: {other}")),
+    };
+    flickcut_render::Region::new(dto.start, dto.end, effect, dto.intensity)
+}
+
+/// Tauri v2 sidecar triple, matching the `ffmpeg-<triple>[.exe]` names the
+/// bundler expects in `src-tauri/binaries/`.
+fn target_triple() -> &'static str {
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    return "x86_64-pc-windows-msvc";
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    return "aarch64-apple-darwin";
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    return "x86_64-apple-darwin";
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    return "x86_64-unknown-linux-gnu";
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    return "aarch64-unknown-linux-gnu";
+}
+
+/// Locate the bundled static ffmpeg: `FFMPEG_PATH` (dev override), then the
+/// sidecar next to the app binary, then PATH.
+fn resolve_ffmpeg() -> Result<String, String> {
+    if let Ok(p) = std::env::var("FFMPEG_PATH") {
+        if !p.is_empty() {
+            return Ok(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let triple = target_triple();
+            let exe_name = if cfg!(windows) { ".exe" } else { "" };
+            for cand in [
+                dir.join(format!("ffmpeg-{triple}{exe_name}")),
+                dir.join(format!("ffmpeg{exe_name}")),
+            ] {
+                if cand.is_file() {
+                    return Ok(cand.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    Ok(if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" }.to_string())
+}
+
+fn default_output_path(video_path: &str) -> String {
+    let p = std::path::Path::new(video_path);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("output");
+    let name = format!("{stem}-flickcut.mp4");
+    match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => {
+            d.join(name).to_string_lossy().into_owned()
+        }
+        _ => name,
+    }
+}
+
+/// IPC v1 `render_video(video_path, regions)` -> `{ output_path }`.
+/// Emits `flickcut://render-progress` with `{ percent: 0-100 }` while running.
+/// The blocking ffmpeg encode runs on a blocking thread pool worker.
+#[tauri::command]
+async fn render_video(
+    app: tauri::AppHandle,
+    video_path: String,
+    regions: Vec<RegionDto>,
+) -> Result<RenderVideoResponse, String> {
+    let mut rs = Vec::with_capacity(regions.len());
+    for dto in &regions {
+        rs.push(dto_to_region(dto)?);
+    }
+    let ffmpeg = resolve_ffmpeg()?;
+    let output_path = default_output_path(&video_path);
+
+    let out = tauri::async_runtime::spawn_blocking(move || {
+        flickcut_render::render_video(
+            &ffmpeg,
+            &video_path,
+            &rs,
+            &output_path,
+            &|pct: u8| {
+                let _ = app.emit(
+                    "flickcut://render-progress",
+                    serde_json::json!({ "percent": pct }),
+                );
+            },
+        )
+        .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("render task panicked: {e}"))?
+    .map_err(|e| e)?;
+
+    Ok(RenderVideoResponse { output_path: out })
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -87,7 +210,67 @@ fn main() {
             input_trail,
             input_clear,
             analyze_moments,
+            render_video,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FlickCut");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dto(start: f64, end: f64, effect: &str, intensity: f64) -> RegionDto {
+        RegionDto {
+            start,
+            end,
+            effect: effect.to_string(),
+            intensity,
+        }
+    }
+
+    #[test]
+    fn dto_converts_all_effects() {
+        for (name, want) in [
+            ("slowmo", flickcut_render::Effect::SlowMo),
+            ("curve", flickcut_render::Effect::Curve),
+            ("zoomin", flickcut_render::Effect::ZoomIn),
+            ("zoomout", flickcut_render::Effect::ZoomOut),
+        ] {
+            let r = dto_to_region(&dto(1.0, 2.0, name, 50.0)).unwrap();
+            assert_eq!(r.effect, want);
+            assert_eq!((r.start, r.end), (1.0, 2.0));
+            assert_eq!(r.intensity, 50.0);
+            // contract has no focus -> center default
+            assert_eq!(r.focus, (0.5, 0.5));
+        }
+    }
+
+    #[test]
+    fn dto_rejects_bad_effect_and_range() {
+        assert!(dto_to_region(&dto(1.0, 2.0, "spin", 50.0)).is_err());
+        assert!(dto_to_region(&dto(2.0, 1.0, "slowmo", 50.0)).is_err());
+    }
+
+    #[test]
+    fn dto_clamps_intensity() {
+        let r = dto_to_region(&dto(1.0, 2.0, "slowmo", 150.0)).unwrap();
+        assert_eq!(r.intensity, 100.0);
+    }
+
+    #[test]
+    fn output_path_next_to_input() {
+        assert_eq!(
+            default_output_path("/tmp/clip.mp4"),
+            "/tmp/clip-flickcut.mp4"
+        );
+        assert_eq!(default_output_path("clip.mp4"), "clip-flickcut.mp4");
+    }
+
+    #[test]
+    fn event_name_matches_contract() {
+        // ipc-contract-v1.md: flickcut://render-progress, { percent: 0-100 }
+        let payload = serde_json::json!({ "percent": 42u8 });
+        assert_eq!(payload["percent"], 42);
+    }
 }
