@@ -70,3 +70,18 @@ Registered for testing and debugging; the frontend uses the six
 commands above. The app-level `start_recording` starts these internally.
 - `input_start()`, `input_stop()`, `input_trail()`, `input_clear()`
   (flickcut-input crate)
+
+
+---
+
+## v1.1 addition (2026-10-18): pause support
+
+The floating control bar (Recordly-style) requires pause/resume.
+
+### `pause_recording()`
+Pauses the active recording session (timer and capture freeze; session stays open).
+Returns: `{ paused_at_sec: number }`
+
+### `resume_recording()`
+Resumes a paused recording session.
+Returns: `{ resumed_at_sec: number }`
