@@ -49,7 +49,7 @@ fn main() {
             });
             let telemetry =
                 flickcut_input::InputTelemetry::new(Some(on_event), 30.0);
-            app.manage(Arc::new(Mutex::new(telemetry)) as TelemetryState);
+            app.manage(Arc::new(Mutex::new(telemetry)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
