@@ -1,11 +1,17 @@
 // Prevents an extra console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// Shared input telemetry, started/stopped from Tauri commands.
 type TelemetryState = Arc<Mutex<flickcut_input::InputTelemetry>>;
+
+/// Registry of finished recording sessions, keyed by session id.
+/// Populated by the session lifecycle (start/stop_recording, import_video);
+/// `analyze_moments` reads from it.
+type SessionsState = Arc<Mutex<flickcut_moments::SessionStore>>;
 
 #[tauri::command]
 fn input_start(state: tauri::State<TelemetryState>) -> Result<(), String> {
@@ -37,6 +43,26 @@ fn input_clear(state: tauri::State<TelemetryState>) -> Result<(), String> {
     Ok(())
 }
 
+/// Contract: `analyze_moments(session_id)` -> `{ markers: Marker[] }`.
+///
+/// Runs moment detection over the session's telemetry. Unknown session id
+/// yields an empty marker list (no error — the frontend treats it as
+/// "nothing detected yet").
+#[tauri::command]
+fn analyze_moments(
+    session_id: String,
+    sessions: tauri::State<SessionsState>,
+) -> Result<AnalyzeMomentsResponse, String> {
+    let store = sessions.lock().map_err(|e| e.to_string())?;
+    let markers = flickcut_moments::analyze_moments(&session_id, &store);
+    Ok(AnalyzeMomentsResponse { markers })
+}
+
+#[derive(serde::Serialize)]
+struct AnalyzeMomentsResponse {
+    markers: Vec<flickcut_moments::Marker>,
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
@@ -50,6 +76,9 @@ fn main() {
             let telemetry =
                 flickcut_input::InputTelemetry::new(Some(on_event), 30.0);
             app.manage(Arc::new(Mutex::new(telemetry)));
+            app.manage(Arc::new(Mutex::new(
+                HashMap::<String, flickcut_moments::SessionData>::new(),
+            )));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -57,6 +86,7 @@ fn main() {
             input_stop,
             input_trail,
             input_clear,
+            analyze_moments,
         ])
         .run(tauri::generate_context!())
         .expect("error while running FlickCut");
