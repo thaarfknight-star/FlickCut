@@ -113,7 +113,7 @@ jobs:
               curl -sSfL -o /tmp/ffmpeg.zip \
                 "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-8.1.zip"
               7z x /tmp/ffmpeg.zip -o/tmp/ff -y
-              cp /tmp/ff/ffmpeg-n8.1-latest-win64-gpl-8.1/bin/ffmpeg.exe \
+              cp /tmp/ff/ffmpeg-*/bin/ffmpeg.exe \
                  "src-tauri/binaries/ffmpeg-${TARGET}.exe"
               ;;
             Linux)
@@ -129,7 +129,8 @@ jobs:
               # OSXExperts native ARM64 static build, GPL with libx264.
               curl -sSfL -o /tmp/ffmpeg.zip "https://www.osxexperts.net/ffmpeg9arm.zip"
               unzip -o -q /tmp/ffmpeg.zip -d /tmp/ff
-              cp /tmp/ff/ffmpeg "src-tauri/binaries/ffmpeg-${TARGET}"
+              FFMAC="$(find /tmp/ff -name ffmpeg -type f | head -1)"
+              cp "$FFMAC" "src-tauri/binaries/ffmpeg-${TARGET}"
               chmod +x "src-tauri/binaries/ffmpeg-${TARGET}"
               ;;
           esac
