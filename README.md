@@ -27,7 +27,10 @@ recorder that captures like it means it. 🎩
 
 ## License
 
-FlickCut is free software released under the **GNU Affero General Public License v3.0** —
-see the `LICENSE` file for the full text.
+I release FlickCut under two licenses — pick whichever suits you best:
 
-Copyright (c) 2026 Taha Arefi — https://github.com/thaarfknight-star
+- **MIT License** — see `LICENSE-MIT`
+- **Apache License 2.0** — see `LICENSE-APACHE`
+
+Copyright (c) 2026 Taha Arefi. The FlickCut name and logo are my trademarks — they're not
+covered by the licenses above.
