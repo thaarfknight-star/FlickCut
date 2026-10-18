@@ -4,9 +4,9 @@
 //! - Mouse click positions (press-edge) and keyboard press events via `rdev`
 //! - Gamepad buttons + triggers via `gilrs`, with hotplug
 //!
-//! All events are timestamped in milliseconds since a **shared session
-//! clock** (`std::time::Instant`) supplied by the caller — the same epoch
-//! the video recorder uses, so input events line up with video frames.
+//! All events are timestamped from a **shared session clock**
+//! ([`Clock`]) supplied by the caller — the same time base the video
+//! recorder uses, so input events line up 1:1 with video frames.
 //!
 //! In the Tauri app, wire it in `.setup()`:
 //!
@@ -25,6 +25,9 @@
 //!         Ok(())
 //!     })
 //! ```
+//!
+//! The recording session hands its `SessionClock` to
+//! [`InputTelemetry::start_with_clock`]; implement [`Clock`] for it.
 
 use device_query::{DeviceQuery, DeviceState};
 use gilrs::{Button, EventType as GilEventType, Gilrs};
@@ -39,14 +42,55 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
+// Session clock abstraction
+// ---------------------------------------------------------------------------
+
+/// Shared session clock (implemented by `flickcut-capture::SessionClock`).
+///
+/// `stamp()` returns `(t_wall, t_mono)`: wall-clock epoch seconds and
+/// monotonic seconds since session start. Input events use `t_mono` so
+/// they line up 1:1 with video frame stamps; `t_wall` is kept for logs.
+pub trait Clock: Send + Sync {
+    fn stamp(&self) -> (f64, f64);
+}
+
+/// `Clock` adapter for a plain `Instant` epoch (used by `start()`).
+#[derive(Clone)]
+struct InstantClock {
+    epoch: Instant,
+    t0_wall: f64,
+}
+
+impl InstantClock {
+    fn new(epoch: Instant) -> Self {
+        Self {
+            epoch,
+            t0_wall: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0),
+        }
+    }
+}
+
+impl Clock for InstantClock {
+    fn stamp(&self) -> (f64, f64) {
+        let mono = self.epoch.elapsed().as_secs_f64();
+        (self.t0_wall + mono, mono)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Event model
 // ---------------------------------------------------------------------------
 
 /// One input event on the shared session timeline.
 #[derive(Clone, Debug, Serialize)]
 pub struct InputEvent {
-    /// Milliseconds since the shared session epoch.
+    /// Milliseconds since session start (monotonic, == video time base).
     pub t_ms: f64,
+    /// Wall-clock epoch seconds (for logs/filenames).
+    pub t_wall: f64,
     /// "cursor" | "mouse" | "keyboard" | "gamepad"
     pub source: &'static str,
     /// "move" | "click_left" | "key_down" | "btn_down" | ...
@@ -57,13 +101,15 @@ pub struct InputEvent {
 
 impl InputEvent {
     fn new(
-        epoch: Instant,
+        clock: &Arc<dyn Clock>,
         source: &'static str,
         action: impl Into<String>,
         detail: HashMap<String, String>,
     ) -> Self {
+        let (t_wall, t_mono) = clock.stamp();
         Self {
-            t_ms: epoch.elapsed().as_secs_f64() * 1000.0,
+            t_ms: t_mono * 1000.0,
+            t_wall,
             source,
             action: action.into(),
             detail,
@@ -88,10 +134,10 @@ pub type EventCallback = Arc<dyn Fn(InputEvent) + Send + Sync>;
 
 /// Background capture of mouse/keyboard/gamepad input.
 ///
-/// Thread-safe. All timestamps use the `epoch` passed to
-/// [`InputTelemetry::start`].
+/// Thread-safe. All timestamps come from the [`Clock`] passed to
+/// [`InputTelemetry::start`] / [`InputTelemetry::start_with_clock`].
 pub struct InputTelemetry {
-    epoch: Option<Instant>,
+    clock: Option<Arc<dyn Clock>>,
     running: Arc<AtomicBool>,
     events: Arc<Mutex<Vec<InputEvent>>>,
     trail: Arc<Mutex<Vec<CursorPoint>>>,
@@ -107,7 +153,7 @@ impl InputTelemetry {
     /// to avoid IPC spam).
     pub fn new(on_event: Option<EventCallback>, cursor_hz: f64) -> Self {
         Self {
-            epoch: None,
+            clock: None,
             running: Arc::new(AtomicBool::new(false)),
             events: Arc::new(Mutex::new(Vec::new())),
             trail: Arc::new(Mutex::new(Vec::new())),
@@ -116,46 +162,59 @@ impl InputTelemetry {
         }
     }
 
-    /// Begin capture on the shared session `epoch`; returns the epoch used.
-    ///
-    /// A second `start` without `stop` is a no-op returning the old epoch.
+    /// Begin capture on a plain `Instant` epoch (kept for tests/standalone
+    /// use). In the app, prefer [`Self::start_with_clock`] with the
+    /// session's `SessionClock`.
     pub fn start(&mut self, epoch: Instant) -> Instant {
+        self.start_with_clock(InstantClock::new(epoch));
+        epoch
+    }
+
+    /// Begin capture on a shared session clock (e.g.
+    /// `flickcut_capture::SessionClock`).
+    ///
+    /// A second start without `stop` is a no-op. The caller keeps
+    /// ownership of their clock value.
+    pub fn start_with_clock<C: Clock + 'static>(&mut self, clock: C) {
         if self.running.load(Ordering::Relaxed) {
-            return self.epoch.unwrap();
+            return;
         }
-        self.epoch = Some(epoch);
+        let clock: Arc<dyn Clock> = Arc::new(clock);
+        self.clock = Some(clock.clone());
         self.running.store(true, Ordering::Relaxed);
 
         // Cursor trail thread.
         {
             let running = self.running.clone();
             let trail = self.trail.clone();
+            let clock = clock.clone();
             let interval = Duration::from_secs_f64(1.0 / self.cursor_hz);
             thread::Builder::new()
                 .name("flickcut-cursor".into())
-                .spawn(move || cursor_trail(epoch, running, trail, interval))
+                .spawn(move || cursor_trail(clock, running, trail, interval))
                 .expect("spawn cursor thread");
         }
         // Global mouse/keyboard hooks (rdev blocks; own thread).
         {
+            let clock = clock.clone();
             let events = self.events.clone();
             let on_event = self.on_event.clone();
             thread::Builder::new()
                 .name("flickcut-hooks".into())
-                .spawn(move || global_hooks(epoch, events, on_event))
+                .spawn(move || global_hooks(clock, events, on_event))
                 .expect("spawn hooks thread");
         }
         // Gamepad thread.
         {
             let running = self.running.clone();
+            let clock = clock.clone();
             let events = self.events.clone();
             let on_event = self.on_event.clone();
             thread::Builder::new()
                 .name("flickcut-gamepad".into())
-                .spawn(move || gamepad_loop(epoch, running, events, on_event))
+                .spawn(move || gamepad_loop(clock, running, events, on_event))
                 .expect("spawn gamepad thread");
         }
-        epoch
     }
 
     /// Signal all capture threads to stop (they exit on their next poll).
@@ -176,15 +235,10 @@ impl InputTelemetry {
         self.trail.lock().unwrap().clone()
     }
 
-    /// Clear events and trail (keeps running state and epoch).
+    /// Clear events and trail (keeps running state and clock).
     pub fn clear(&self) {
         self.events.lock().unwrap().clear();
         self.trail.lock().unwrap().clear();
-    }
-
-    /// The session epoch, if started.
-    pub fn epoch(&self) -> Option<Instant> {
-        self.epoch
     }
 
     pub fn running(&self) -> bool {
@@ -198,8 +252,8 @@ impl InputTelemetry {
         action: impl Into<String>,
         detail: HashMap<String, String>,
     ) {
-        let epoch = self.epoch.expect("start() before pushing");
-        let ev = InputEvent::new(epoch, source, action, detail);
+        let clock = self.clock.as_ref().expect("start() before pushing");
+        let ev = InputEvent::new(clock, source, action, detail);
         push_event(&self.events, &self.on_event, ev);
     }
 }
@@ -221,7 +275,7 @@ fn push_event(
 
 /// Poll cursor position; append `(t_ms, x, y)` to the trail.
 fn cursor_trail(
-    epoch: Instant,
+    clock: Arc<dyn Clock>,
     running: Arc<AtomicBool>,
     trail: Arc<Mutex<Vec<CursorPoint>>>,
     interval: Duration,
@@ -229,8 +283,9 @@ fn cursor_trail(
     let device = DeviceState::new();
     while running.load(Ordering::Relaxed) {
         let (x, y) = device.get_mouse().coords;
+        let (_, t_mono) = clock.stamp();
         trail.lock().unwrap().push(CursorPoint {
-            t_ms: epoch.elapsed().as_secs_f64() * 1000.0,
+            t_ms: t_mono * 1000.0,
             x,
             y,
         });
@@ -240,7 +295,7 @@ fn cursor_trail(
 
 /// Global mouse/keyboard hooks via rdev (press-edge only).
 fn global_hooks(
-    epoch: Instant,
+    clock: Arc<dyn Clock>,
     events: Arc<Mutex<Vec<InputEvent>>>,
     on_event: Option<EventCallback>,
 ) {
@@ -263,7 +318,7 @@ fn global_hooks(
                 }
                 _ => return, // press-edge only; moves come from the poller
             };
-        push_event(&events, &on_event, InputEvent::new(epoch, source, action, detail));
+        push_event(&events, &on_event, InputEvent::new(&clock, source, action, detail));
     }) {
         eprintln!("rdev listen failed: {:?}", e);
     }
@@ -271,7 +326,7 @@ fn global_hooks(
 
 /// Gamepad buttons/triggers via gilrs (hotplug handled internally).
 fn gamepad_loop(
-    epoch: Instant,
+    clock: Arc<dyn Clock>,
     running: Arc<AtomicBool>,
     events: Arc<Mutex<Vec<InputEvent>>>,
     on_event: Option<EventCallback>,
@@ -303,7 +358,7 @@ fn gamepad_loop(
             push_event(
                 &events,
                 &on_event,
-                InputEvent::new(epoch, "gamepad", action, detail),
+                InputEvent::new(&clock, "gamepad", action, detail),
             );
         }
         thread::sleep(Duration::from_millis(8));
@@ -319,26 +374,32 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
+    fn test_clock(offset: Duration) -> Arc<dyn Clock> {
+        Arc::new(InstantClock::new(Instant::now() - offset))
+    }
+
     #[test]
-    fn timestamps_use_shared_epoch() {
-        let epoch = Instant::now() - Duration::from_secs(5);
-        let ev = InputEvent::new(epoch, "mouse", "click_left", HashMap::new());
+    fn timestamps_use_shared_clock() {
+        let clock = test_clock(Duration::from_secs(5));
+        let ev = InputEvent::new(&clock, "mouse", "click_left", HashMap::new());
         assert!(
             (4950.0..=5150.0).contains(&ev.t_ms),
             "t_ms={} not ~5000",
             ev.t_ms
         );
+        // t_wall is epoch seconds: sane range check.
+        assert!(ev.t_wall > 1_700_000_000.0, "t_wall={}", ev.t_wall);
     }
 
     #[test]
     fn events_stay_chronological() {
-        let epoch = Instant::now();
+        let clock = test_clock(Duration::ZERO);
         let events = Arc::new(Mutex::new(Vec::new()));
         for _ in 0..50 {
             events
                 .lock()
                 .unwrap()
-                .push(InputEvent::new(epoch, "cursor", "move", HashMap::new()));
+                .push(InputEvent::new(&clock, "cursor", "move", HashMap::new()));
         }
         let guard = events.lock().unwrap();
         let ts: Vec<f64> = guard.iter().map(|e| e.t_ms).collect();
@@ -349,12 +410,15 @@ mod tests {
 
     #[test]
     fn trail_points_chronological() {
-        let epoch = Instant::now();
+        let clock = test_clock(Duration::ZERO);
         let pts: Vec<CursorPoint> = (0..20)
-            .map(|i| CursorPoint {
-                t_ms: epoch.elapsed().as_secs_f64() * 1000.0,
-                x: 100 + i,
-                y: 200,
+            .map(|i| {
+                let (_, t_mono) = clock.stamp();
+                CursorPoint {
+                    t_ms: t_mono * 1000.0,
+                    x: 100 + i,
+                    y: 200,
+                }
             })
             .collect();
         assert_eq!(pts.len(), 20);
@@ -365,19 +429,38 @@ mod tests {
         assert_eq!((pts[0].x, pts[19].x), (100, 119));
     }
 
+    /// A foreign clock (like TAgent's SessionClock) drives the same stamps.
     #[test]
-    fn shared_clock_sync_across_sources() {
-        let epoch = Instant::now() - Duration::from_millis(2500);
-        let a = InputEvent::new(epoch, "mouse", "click_left", HashMap::new());
+    fn foreign_clock_contract() {
+        #[derive(Clone)]
+        struct FakeSessionClock {
+            t0: Instant,
+        }
+        impl Clock for FakeSessionClock {
+            fn stamp(&self) -> (f64, f64) {
+                // Mimics SessionClock: (t_wall, t_mono).
+                (1_800_000_000.0, self.t0.elapsed().as_secs_f64())
+            }
+        }
+        let mut t = InputTelemetry::new(None, 30.0);
+        t.start_with_clock(FakeSessionClock {
+            t0: Instant::now() - Duration::from_millis(2500),
+        });
+        assert!(t.running());
+        t.push_test_event("mouse", "click_left", HashMap::new());
         thread::sleep(Duration::from_millis(50));
-        let b = InputEvent::new(epoch, "gamepad", "btn_down", HashMap::new());
-        assert!(b.t_ms > a.t_ms);
-        assert!((2500.0..=2700.0).contains(&a.t_ms), "a.t_ms={}", a.t_ms);
+        t.push_test_event("gamepad", "btn_down", HashMap::new());
+        t.stop();
+        let evs = t.events();
+        assert_eq!(evs.len(), 2);
+        assert!(evs[1].t_ms > evs[0].t_ms);
+        assert!((2500.0..=2700.0).contains(&evs[0].t_ms), "t_ms={}", evs[0].t_ms);
         assert!(
-            (b.t_ms - a.t_ms - 50.0).abs() < 40.0,
-            "delta not ~50ms: {}",
-            b.t_ms - a.t_ms
+            (evs[1].t_ms - evs[0].t_ms - 50.0).abs() < 40.0,
+            "delta not ~50ms"
         );
+        // t_wall comes from the foreign clock.
+        assert_eq!(evs[0].t_wall, 1_800_000_000.0);
     }
 
     #[test]
@@ -387,8 +470,8 @@ mod tests {
         let epoch = Instant::now();
         assert_eq!(t.start(epoch), epoch);
         assert!(t.running());
-        assert_eq!(t.start(Instant::now()), epoch); // no-op
-        assert_eq!(t.epoch(), Some(epoch));
+        t.start(Instant::now()); // second start: no-op
+        assert!(t.running());
         t.push_test_event("mouse", "click_left", HashMap::new());
         assert_eq!(t.events().len(), 1);
         t.stop();
@@ -415,10 +498,11 @@ mod tests {
     #[test]
     fn event_serializes_for_tauri_emit() {
         // `app.emit("flickcut://input-event", ev)` requires Serialize.
-        let epoch = Instant::now();
-        let ev = InputEvent::new(epoch, "mouse", "click_left", HashMap::new());
+        let clock = test_clock(Duration::ZERO);
+        let ev = InputEvent::new(&clock, "mouse", "click_left", HashMap::new());
         let json = serde_json::to_string(&ev).expect("serialize");
         assert!(json.contains("\"t_ms\""));
+        assert!(json.contains("\"t_wall\""));
         assert!(json.contains("click_left"));
     }
 }
