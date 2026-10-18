@@ -68,7 +68,7 @@ jobs:
             libxcb-shm0-dev \
             libxcb-randr0-dev \
             libxrandr-dev \
-            libdbus-1-dev
+            libdbus-1-dev libudev-dev
 
       - name: Install frontend dependencies
         run: npm ci --prefix frontend-spike
