@@ -209,8 +209,8 @@ fn recording_output_path(app: &tauri::AppHandle) -> std::path::PathBuf {
 async fn start_recording(
     source_id: String,
     app: tauri::AppHandle,
-    sessions: tauri::State<SessionState>,
-    telemetry: tauri::State<TelemetryState>,
+    sessions: tauri::State<'_, SessionState>,
+    telemetry: tauri::State<'_, TelemetryState>,
 ) -> Result<SessionInfo, String> {
     {
         let guard = sessions.lock().map_err(|e| e.to_string())?;
@@ -293,9 +293,9 @@ async fn start_recording(
 /// telemetry in `SessionsState` so `analyze_moments(session_id)` works.
 #[tauri::command]
 async fn stop_recording(
-    sessions: tauri::State<SessionState>,
-    telemetry: tauri::State<TelemetryState>,
-    store: tauri::State<SessionsState>,
+    sessions: tauri::State<'_, SessionState>,
+    telemetry: tauri::State<'_, TelemetryState>,
+    store: tauri::State<'_, SessionsState>,
 ) -> Result<StopInfo, String> {
     let mut session = {
         let mut guard = sessions.lock().map_err(|e| e.to_string())?;
