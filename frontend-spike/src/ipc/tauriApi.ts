@@ -1,26 +1,32 @@
 /**
  * tauriApi — the ONLY module the UI talks to.
  *
- * When running inside the Tauri shell (`window.__TAURI__` present) every
- * function below delegates to the real `invoke`/`listen`. Otherwise it
- * falls back to the mock backend, so the editor runs standalone in a
- * plain browser (`vite dev`).
+ * Implements docs/ipc-contract-v1.md. Inside the Tauri shell
+ * (`window.__TAURI__` present) every function delegates to the real
+ * `invoke`/`listen`; otherwise it falls back to the mock backend so the
+ * editor runs standalone in a plain browser (`vite dev`).
  *
- * Components must import from here — never from `mockBackend`, never
- * `invoke`/`listen` directly. Connecting TAgent5's shell = no component
- * changes.
+ * Components must import from here — never `invoke`/`listen` directly.
  */
 import { COMMANDS, EVENTS } from "./contract";
 import { mockInvoke, mockListen } from "./mockBackend";
 import type {
-  CaptureSource,
-  Moment,
-  RecordingSummary,
+  InputEvent,
+  Marker,
+  RecordingTick,
   Region,
   RenderProgress,
+  SourceList,
 } from "./types";
 
-export type { CaptureSource, Moment, RecordingSummary, Region, RenderProgress };
+export type {
+  InputEvent,
+  Marker,
+  RecordingTick,
+  Region,
+  RenderProgress,
+  SourceList,
+};
 export type { MomentType, EffectType } from "./types";
 
 declare global {
@@ -39,8 +45,7 @@ declare global {
   }
 }
 
-const inTauri =
-  typeof window !== "undefined" && !!window.__TAURI__;
+const inTauri = typeof window !== "undefined" && !!window.__TAURI__;
 
 async function invoke<T>(
   command: string,
@@ -52,10 +57,7 @@ async function invoke<T>(
   return mockInvoke<T>(command, args);
 }
 
-function listen<T>(
-  event: string,
-  handler: (payload: T) => void
-): () => void {
+function listen<T>(event: string, handler: (payload: T) => void): () => void {
   if (inTauri) {
     let unsub: (() => void) | null = null;
     window
@@ -70,45 +72,45 @@ function listen<T>(
 
 /* -- commands ---------------------------------------------------- */
 
-export const listSources = (): Promise<CaptureSource[]> =>
-  invoke<CaptureSource[]>(COMMANDS.LIST_SOURCES);
+export const listSources = (): Promise<SourceList> =>
+  invoke<SourceList>(COMMANDS.LIST_SOURCES);
 
 export const startRecording = (
   sourceId: string
 ): Promise<{ session_id: string }> =>
   invoke(COMMANDS.START_RECORDING, { source_id: sourceId });
 
-export const stopRecording = (): Promise<RecordingSummary> =>
-  invoke<RecordingSummary>(COMMANDS.STOP_RECORDING);
+export const stopRecording = (): Promise<{
+  video_path: string;
+  duration_sec: number;
+}> => invoke(COMMANDS.STOP_RECORDING);
 
-export const detectMoments = (videoPath: string): Promise<Moment[]> =>
-  invoke<Moment[]>(COMMANDS.DETECT_MOMENTS, { video_path: videoPath });
+export const analyzeMoments = (
+  sessionId: string
+): Promise<{ markers: Marker[] }> =>
+  invoke(COMMANDS.ANALYZE_MOMENTS, { session_id: sessionId });
 
-export const renderPreview = (
+export const renderVideo = (
   videoPath: string,
   regions: Region[]
-): Promise<{ preview_path: string }> =>
-  invoke(COMMANDS.RENDER_PREVIEW, { video_path: videoPath, regions });
-
-export const exportHighlights = (
-  videoPath: string,
-  regions: Region[],
-  outputPath: string
 ): Promise<{ output_path: string }> =>
-  invoke(COMMANDS.EXPORT_HIGHLIGHTS, {
-    video_path: videoPath,
-    regions,
-    output_path: outputPath,
-  });
+  invoke(COMMANDS.RENDER_VIDEO, { video_path: videoPath, regions });
+
+export const importVideo = (path: string): Promise<{ session_id: string }> =>
+  invoke(COMMANDS.IMPORT_VIDEO, { path });
 
 /* -- events ------------------------------------------------------ */
 
-export const onMomentDetected = (
-  handler: (m: Moment) => void
-): (() => void) => listen<Moment>(EVENTS.MOMENT_DETECTED, handler);
+export const onRecordingTick = (
+  handler: (t: RecordingTick) => void
+): (() => void) => listen<RecordingTick>(EVENTS.RECORDING_TICK, handler);
 
 export const onRenderProgress = (
   handler: (p: RenderProgress) => void
 ): (() => void) => listen<RenderProgress>(EVENTS.RENDER_PROGRESS, handler);
+
+export const onInputEvent = (
+  handler: (e: InputEvent) => void
+): (() => void) => listen<InputEvent>(EVENTS.INPUT_EVENT, handler);
 
 export const isRunningInTauri = (): boolean => inTauri;

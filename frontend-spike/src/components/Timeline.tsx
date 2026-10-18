@@ -1,26 +1,28 @@
 import { MOMENT_COLORS, REGION_COLORS, THEME } from "../theme";
-import { DURATION } from "../mockData";
-import type { Moment, Region } from "../ipc/tauriApi";
+import type { Marker, Region } from "../ipc/tauriApi";
 
 interface Props {
-  moments: Moment[];
+  markers: Marker[];
   regions: Region[];
-  selectedRegionId: string | null;
+  duration: number; // seconds
+  selectedRegion: number | null; // index
   playhead: number; // seconds
-  onSelectRegion: (id: string | null) => void;
+  onSelectRegion: (index: number | null) => void;
 }
 
 const BAR_H = 26;
 
 export default function Timeline({
-  moments,
+  markers,
   regions,
-  selectedRegionId,
+  duration,
+  selectedRegion,
   playhead,
   onSelectRegion,
 }: Props) {
-  const x = (t: number) => `${(t / DURATION) * 100}%`;
-  const w = (s: number, e: number) => `${((e - s) / DURATION) * 100}%`;
+  const span = Math.max(duration, 1);
+  const x = (t: number) => `${(t / span) * 100}%`;
+  const w = (s: number, e: number) => `${((e - s) / span) * 100}%`;
 
   return (
     <div
@@ -39,13 +41,13 @@ export default function Timeline({
         }}
       >
         {/* region bars */}
-        {regions.map((r) => {
-          const selected = r.id === selectedRegionId;
+        {regions.map((r, i) => {
+          const selected = i === selectedRegion;
           return (
             <div
-              key={r.id}
+              key={i}
               title={`${r.effect} ${r.start.toFixed(1)}s–${r.end.toFixed(1)}s`}
-              onClick={() => onSelectRegion(selected ? null : r.id)}
+              onClick={() => onSelectRegion(selected ? null : i)}
               style={{
                 position: "absolute",
                 left: x(r.start),
@@ -64,10 +66,10 @@ export default function Timeline({
             />
           );
         })}
-        {/* moment diamonds */}
-        {moments.map((m) => (
+        {/* marker diamonds */}
+        {markers.map((m, i) => (
           <div
-            key={m.id}
+            key={i}
             title={`${m.type} @ ${m.timestamp.toFixed(1)}s`}
             style={{
               position: "absolute",
@@ -105,8 +107,10 @@ export default function Timeline({
         }}
       >
         <span>0:00</span>
-        <span>{DURATION.toFixed(0)}s mock video</span>
-        <span>{Math.floor(DURATION / 60)}:{String(Math.floor(DURATION % 60)).padStart(2, "0")}</span>
+        <span>{span.toFixed(0)}s video</span>
+        <span>
+          {Math.floor(span / 60)}:{String(Math.floor(span % 60)).padStart(2, "0")}
+        </span>
       </div>
     </div>
   );

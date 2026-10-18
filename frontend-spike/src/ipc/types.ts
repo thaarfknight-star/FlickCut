@@ -1,43 +1,53 @@
 /**
- * Shared IPC types — mirror the Rust side (src-tauri) 1:1.
+ * Shared IPC types — mirror docs/ipc-contract-v1.md 1:1.
  * These are the shapes that cross the Tauri invoke/listen boundary.
  */
 
 export type MomentType = "kill" | "hit" | "exciting";
 export type EffectType = "slowmo" | "curve" | "zoomin" | "zoomout";
 
-export interface CaptureSource {
+export interface ScreenSource {
   id: string;
   name: string;
-  kind: "screen" | "window";
 }
 
-export interface Moment {
+export interface WindowSource {
   id: string;
-  timestamp: number; // seconds, video-time
+  title: string;
+}
+
+export interface SourceList {
+  screens: ScreenSource[];
+  windows: WindowSource[];
+}
+
+export interface Marker {
+  timestamp: number; // seconds
   type: MomentType;
-  intensity: number; // 0..100
-  /** Normalized action focus point (0..1) — zoom follows this. */
-  x?: number;
-  y?: number;
+  intensity: number; // 0-100
+  duration: number; // seconds
+  x: number; // normalized 0-1 (action focus point)
+  y: number; // normalized 0-1 (action focus point)
 }
 
 export interface Region {
-  id: string;
   start: number; // seconds
   end: number; // seconds
   effect: EffectType;
-  intensity: number; // 0..100
+  intensity: number; // 0-100
 }
 
-export interface RecordingSummary {
-  session_id: string;
-  video_path: string;
-  duration_s: number;
-  moments: Moment[];
+export interface RecordingTick {
+  elapsed_sec: number;
 }
 
 export interface RenderProgress {
-  job_id: string;
-  progress: number; // 0..100
+  percent: number; // 0-100
+}
+
+export interface InputEvent {
+  t_ms: number;
+  source: string;
+  action: string;
+  detail: Record<string, unknown>;
 }

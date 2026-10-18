@@ -1,53 +1,25 @@
-# FlickCut IPC Contract v1 (proposed)
+# IPC Contract
 
-The interface between the React frontend and the Tauri v2 Rust shell.
-The frontend talks to it **only** through `src/ipc/tauriApi.ts` — components
-never call `invoke`/`listen` directly.
+The normative contract is **`docs/ipc-contract-v1.md`** on main (frozen by
+the project lead — do not change without approval).
 
-## Commands (frontend → Rust, via `invoke`)
+This directory implements it:
 
-| # | Command | Args | Returns |
-|---|---------|------|---------|
-| 1 | `list_sources` | — | `CaptureSource[]` |
-| 2 | `start_recording` | `{ source_id: string }` | `{ session_id: string }` |
-| 3 | `stop_recording` | — | `RecordingSummary` |
-| 4 | `detect_moments` | `{ video_path: string }` | `Moment[]` |
-| 5 | `render_preview` | `{ video_path: string, regions: Region[] }` | `{ preview_path: string }` |
-| 6 | `export_highlights` | `{ video_path: string, regions: Region[], output_path: string }` | `{ output_path: string }` |
+- `src/ipc/contract.ts` — typed index of the 6 commands + 3 events
+- `src/ipc/types.ts` — shared IPC shapes (Marker, Region, …)
+- `src/ipc/tauriApi.ts` — the ONLY module components import; delegates to
+  real `invoke`/`listen` inside Tauri, mock backend in a plain browser
+- `src/ipc/mockBackend.ts` — mock implementation of the contract
 
-## Events (Rust → frontend, via `listen`)
+## Quick reference
 
-| # | Event | Payload | When |
-|---|-------|---------|------|
-| 1 | `moment-detected` | `Moment` | live, while recording |
-| 2 | `render-progress` | `RenderProgress { job_id, progress: 0..100 }` | during `render_preview` / `export_highlights` |
+Commands: `list_sources` → `{ screens, windows }` ·
+`start_recording(source_id)` → `{ session_id }` ·
+`stop_recording()` → `{ video_path, duration_sec }` ·
+`analyze_moments(session_id)` → `{ markers }` ·
+`render_video(video_path, regions)` → `{ output_path }` ·
+`import_video(path)` → `{ session_id }`
 
-## Types
-
-```ts
-interface CaptureSource { id: string; name: string; kind: "screen" | "window" }
-interface Moment {
-  id: string; timestamp: number; type: "kill" | "hit" | "exciting";
-  intensity: number; x?: number; y?: number;  // x/y: normalized action focus
-}
-interface Region {
-  id: string; start: number; end: number;
-  effect: "slowmo" | "curve" | "zoomin" | "zoomout"; intensity: number;
-}
-interface RecordingSummary {
-  session_id: string; video_path: string;
-  duration_s: number; moments: Moment[];
-}
-interface RenderProgress { job_id: string; progress: number }
-```
-
-## Mock mode
-
-Outside Tauri (`window.__TAURI__` absent), `tauriApi` delegates to
-`src/ipc/mockBackend.ts`, which implements the same contract with timers
-and fake data — the editor runs standalone via `vite dev`.
-
-## Status
-
-Proposed by TAgent4 (2026-10-18). TAgent5's shell will implement the Rust
-side; renames go through `src/ipc/contract.ts` only.
+Events: `flickcut://recording-tick` `{ elapsed_sec }` ·
+`flickcut://render-progress` `{ percent }` ·
+`flickcut://input-event` `{ t_ms, source, action, detail }`
