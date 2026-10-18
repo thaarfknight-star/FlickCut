@@ -4,7 +4,6 @@ import type { EffectType, Region } from "../ipc/tauriApi";
 
 interface Props {
   region: Region | null;
-  recording: boolean;
   busy: boolean;
   progress: number;
   log: string[];
@@ -105,11 +104,11 @@ export default function SettingsDock(p: Props) {
         SESSION
       </div>
       <button
-        className={p.recording ? "btn btn-stop" : "btn btn-record"}
+        className="btn btn-record"
         onClick={p.onToggleRecording}
         disabled={p.busy}
       >
-        {p.recording ? "■  Stop" : "●  Record"}
+        ▭&nbsp;&nbsp;Back to bar
       </button>
       <button className="btn" onClick={p.onImport} disabled={p.busy}>
         ↓ Import video

@@ -1,7 +1,7 @@
-# FlickCut Editor — React Spike
+# FlickCut — React Frontend (Recordly-style)
 
-Runnable React prototype of the Recordly-style editor for the FlickCut
-Tauri v2 rewrite. **Mock data only** — no Tauri shell, no real capture.
+Runnable React prototype of the FlickCut Tauri v2 frontend.
+**Mock IPC only** — no Tauri shell, no real capture.
 
 ## Run it
 
@@ -11,25 +11,31 @@ npm install
 npm run dev      # → http://localhost:5173
 ```
 
-## What it shows
+## Flow (Recordly-style)
 
-- **Header bar** — transparent logo, title + version, elapsed timer,
-  READY/REC pill, Check-for-Updates + About buttons.
-- **Library dock** — Moments list (delete/clear) + Edit Regions list.
-- **Center preview** — mock gameplay frame (real video via Tauri later).
-- **Settings dock** — region effect combo, intensity slider with live %,
-  start/end inputs, Add/Delete region; Record/Stop, Import video,
-  Auto-Edit + Preview, Export highlights; progress bar + log.
-- **Timeline** — full width, region bars colored by effect, moment
-  diamonds, playhead; click a bar to select the region.
+1. **Launch → floating bar.** A pill floats bottom-center (in Tauri: a
+   second window — `decorations: false`, `alwaysOnTop: true`; see
+   `WINDOWS_SPEC.md`). Source picker, mic toggle, big Record button.
+2. **Record** → bar shows pulsing dot, timer, pause/resume, stop, and an
+   "open editor" button.
+3. **Stop → the editor opens automatically.** Markers are analyzed, edit
+   regions are suggested on the timeline.
 
-## Theme
+## What is in the editor
 
-The whole palette lives in `frontend-spike/src/theme.ts` (mirrors the
-legacy PyQt `THEME` dict): logo chrome `#e3e6ec / #c0c8d8 / #a1a8b6 /
-#8b8f98 / #6d717b / #494c55` on `#0A0C10`.
+- **Slim header** — logo, title, timer, status pill, minimize-to-bar.
+- **Library dock** — markers list (delete/clear) + edit regions list.
+- **Center preview** — mock frame (real video via Tauri later).
+- **Settings dock** — region effect, intensity slider with live %,
+  start/end, add/delete; import, auto-edit, export; progress + log.
+- **Timeline** — full width, region bars, marker diamonds, playhead.
 
-## Status
+## IPC
 
-Spike only — not wired to any backend. The Tauri v2 shell, capture
-pipeline, and editor engine land separately.
+The normative contract is `docs/ipc-contract-v1.md` on main (frozen).
+`src/ipc/tauriApi.ts` is the only module components import — real
+`invoke`/`listen` inside Tauri, mock backend in the browser.
+
+Note: pause/resume is **not** in contract v1 — the buttons work in the
+mock, but the shell needs a v1.1 decision (`pause_recording` /
+`resume_recording`).
