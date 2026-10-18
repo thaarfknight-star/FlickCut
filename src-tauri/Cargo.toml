@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/flickcut-input", "crates/flickcut-moments", "crates/flickcut-engine", "crates/flickcut-render"]
+members = [".", "crates/flickcut-input", "crates/flickcut-moments", "crates/flickcut-engine", "crates/flickcut-render", "crates/flickcut-capture"]
 resolver = "2"
 
 [package]
@@ -20,3 +20,4 @@ flickcut-moments = { path = "crates/flickcut-moments" }
 [features]
 default = [ "custom-protocol" ]
 custom-protocol = [ "tauri/custom-protocol" ]
+

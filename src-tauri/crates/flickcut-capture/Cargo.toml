@@ -1,0 +1,18 @@
+[package]
+name = "flickcut-capture"
+version = "0.1.0"
+edition = "2021"
+description = "FlickCut Tauri v2 capture module: native screen capture via scap, session clock, ffmpeg encoding"
+license = "AGPL-3.0-only"
+
+[lib]
+name = "flickcut_capture"
+path = "src/lib.rs"
+
+[[bin]]
+name = "flickcut-harness"
+path = "src/bin/harness.rs"
+
+[dependencies]
+scap = "0.0.8"
+crossbeam-channel = "0.5"
