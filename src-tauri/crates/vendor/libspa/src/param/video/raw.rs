@@ -259,20 +259,20 @@ impl VideoInfoRaw {
         VideoFormat::from_raw(self.0.format)
     }
 
-    pub fn set_flags(&mut self, flags: VideoFlags) {
-        self.0.flags = flags.bits();
-    }
+    // FlickCut patch: `flags`/`modifier` don't exist in spa_video_info_raw
+    // on old PipeWire headers (< 0.3.6x). These are no-ops there; modifier
+    // negotiation isn't used by our capture path (and nothing in the
+    // pipewire crate calls them either).
+    pub fn set_flags(&mut self, _flags: VideoFlags) {}
 
     pub fn flags(self) -> VideoFlags {
-        VideoFlags::from_bits_retain(self.0.flags)
+        VideoFlags::empty()
     }
 
-    pub fn set_modifier(&mut self, modifier: u64) {
-        self.0.modifier = modifier;
-    }
+    pub fn set_modifier(&mut self, _modifier: u64) {}
 
     pub fn modifier(self) -> u64 {
-        self.0.modifier
+        0
     }
 
     pub fn set_size(&mut self, size: Rectangle) {

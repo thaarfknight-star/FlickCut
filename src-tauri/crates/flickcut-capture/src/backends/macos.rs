@@ -147,7 +147,7 @@ impl Backend for MacosBackend {
                 },
                 SCStreamOutputType::Screen,
             )
-            .map_err(|e| CaptureError::CaptureFailed(format!("{e:?}"))?;
+            .map_err(|e| CaptureError::CaptureFailed(format!("{e:?}")))?;
 
         stream
             .start_capture()
@@ -163,3 +163,4 @@ impl Backend for MacosBackend {
         }
     }
 }
+
