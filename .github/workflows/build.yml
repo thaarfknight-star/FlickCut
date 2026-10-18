@@ -34,6 +34,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cleanup old caches
+        # Keep only the most recent cache per key prefix; delete the rest
+        # to stay within GitHub's cache quota. Runs on every build.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # List all caches, keep newest per key prefix, delete the rest
+          gh api "/repos/${{ github.repository }}/actions/caches?per_page=100" --paginate             | jq -r '.actions_caches | sort_by(.created_at) | reverse | .[] | "\(.id) \(.key)"'             | awk '{key=$2; sub(/-[0-9a-f]+$/, "", key); if (seen[key]++) print $1}'             | while read -r cache_id; do
+              echo "Deleting old cache $cache_id"
+              gh api -X DELETE "/repos/${{ github.repository }}/actions/caches/$cache_id" || true
+            done
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
