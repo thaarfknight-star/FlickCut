@@ -24,4 +24,11 @@ flickcut-capture = { path = "crates/flickcut-capture" }
 default = [ "custom-protocol" ]
 custom-protocol = [ "tauri/custom-protocol" ]
 
+# libspa 0.8.0 does not compile against PipeWire < 0.3.6x headers
+# (Ubuntu 22.04 ships 0.3.48): VideoInfoRaw::new() names struct fields
+# that don't exist there. Vendored copy with a field-by-field construction
+# fix; see crates/vendor/libspa/FLICKCUT_PATCH.md.
+[patch.crates-io]
+libspa = { path = "crates/vendor/libspa" }
+
 
