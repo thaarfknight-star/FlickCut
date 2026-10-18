@@ -85,10 +85,9 @@ once this core is approved.
 
 ## Prototype status
 
-`cargo test` could not run in this environment yet (Rust toolchain install
-in progress — slow network). The code is written carefully against the
-merged Python behavior; tests mirror the Python suite 1:1. If the toolchain
-lands, `cargo test` in `flickcut-engine/` is the verification step.
+**Verified:** `cargo test` — 6/6 green on rustc 1.99.1. The prototype
+compiles cleanly with no dependencies (pure std) and all behavior matches
+the merged Python `editor.py` (round-trips, glide, describe formats).
 
 ## Open questions for DEVagent
 
