@@ -78,6 +78,51 @@ jobs:
       - name: Write CI config override
         run: echo '{"bundle":{"createUpdaterArtifacts":false}}' > src-tauri/ci-override.json
 
+      # Bundles a static ffmpeg as a Tauri v2 sidecar so render_video works
+      # on the user's machine. Tauri auto-bundles anything in
+      # src-tauri/binaries/ named <name>-<triple>[.exe]; resolve_ffmpeg()
+      # in main.rs finds it next to the app binary.
+      #
+      # All three builds are GPL with libx264 (AGPL-3.0 compatible).
+      - name: Download ffmpeg sidecar
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p src-tauri/binaries
+          TARGET="${{ matrix.target }}"
+          case "${{ runner.os }}" in
+            Windows)
+              # BtbN static GPL build (has libx264).
+              curl -sSfL -o /tmp/ffmpeg.zip \
+                "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+              7z x /tmp/ffmpeg.zip -o/tmp/ff -y
+              cp /tmp/ff/ffmpeg-master-latest-win64-gpl/bin/ffmpeg.exe \
+                 "src-tauri/binaries/ffmpeg-${TARGET}.exe"
+              ;;
+            Linux)
+              # johnvansickle static build (has libx264).
+              curl -sSfL -o /tmp/ffmpeg.tar.xz \
+                "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+              tar -xf /tmp/ffmpeg.tar.xz -C /tmp
+              cp /tmp/ffmpeg-*-amd64-static/ffmpeg \
+                 "src-tauri/binaries/ffmpeg-${TARGET}"
+              chmod +x "src-tauri/binaries/ffmpeg-${TARGET}"
+              ;;
+            macOS)
+              # evermeet.cx static build (Intel; runs via Rosetta 2 on arm64).
+              # BtbN publishes no macOS builds. Has libx264.
+              curl -sSfL -o /tmp/ffmpeg.zip "https://evermeet.cx/ffmpeg/getrelease/zip"
+              unzip -o -q /tmp/ffmpeg.zip -d /tmp/ff
+              cp /tmp/ff/ffmpeg "src-tauri/binaries/ffmpeg-${TARGET}"
+              chmod +x "src-tauri/binaries/ffmpeg-${TARGET}"
+              ;;
+          esac
+          echo "--- sidecar binaries ---"
+          ls -lh src-tauri/binaries/
+          # Smoke-test: the binary runs and has libx264.
+          BIN="$(ls src-tauri/binaries/ffmpeg-* | head -1)"
+          "$BIN" -hide_banner -h encoder=libx264 2>&1 | head -3
+
       - name: Build with Tauri Action
         uses: tauri-apps/tauri-action@v0
         env:
