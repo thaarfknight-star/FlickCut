@@ -1,9 +1,6 @@
 import { THEME } from "../theme";
-import {
-  EFFECT_LABELS,
-  type EffectType,
-  type Region,
-} from "../mockData";
+import { EFFECT_LABELS } from "../mockData";
+import type { EffectType, Region } from "../ipc/tauriApi";
 
 interface Props {
   region: Region | null;

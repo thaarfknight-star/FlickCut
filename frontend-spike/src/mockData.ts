@@ -1,22 +1,11 @@
-/** Mock data for the editor spike — mirrors the legacy session pipeline. */
+/**
+ * Mock helpers for the editor — pure functions only.
+ * Types live in ./ipc/types; components must NOT import mock data,
+ * they go through ./ipc/tauriApi.
+ */
+import type { EffectType, Marker, Region } from "./ipc/types";
 
-export type MomentType = "kill" | "hit" | "exciting";
-export type EffectType = "slowmo" | "curve" | "zoomin" | "zoomout";
-
-export interface Moment {
-  id: string;
-  timestamp: number; // seconds
-  type: MomentType;
-  intensity: number; // 0..100
-}
-
-export interface Region {
-  id: string;
-  start: number; // seconds
-  end: number; // seconds
-  effect: EffectType;
-  intensity: number; // 0..100
-}
+export type { EffectType, Marker, Region };
 
 export const EFFECT_LABELS: Record<EffectType, string> = {
   slowmo: "Slow-mo",
@@ -27,29 +16,46 @@ export const EFFECT_LABELS: Record<EffectType, string> = {
 
 export const DURATION = 124.5; // mock video length, seconds
 
-export const MOCK_MOMENTS: Moment[] = [
-  { id: "m1", timestamp: 12.4, type: "kill", intensity: 95 },
-  { id: "m2", timestamp: 34.8, type: "hit", intensity: 60 },
-  { id: "m3", timestamp: 47.2, type: "kill", intensity: 88 },
-  { id: "m4", timestamp: 71.9, type: "exciting", intensity: 74 },
-  { id: "m5", timestamp: 102.3, type: "kill", intensity: 91 },
-];
-
-export const MOCK_REGIONS: Region[] = [
-  { id: "r1", start: 12.0, end: 13.2, effect: "slowmo", intensity: 79 },
-  { id: "r2", start: 12.1, end: 13.4, effect: "zoomin", intensity: 62 },
-  { id: "r3", start: 46.8, end: 48.0, effect: "slowmo", intensity: 85 },
-  { id: "r4", start: 71.5, end: 72.8, effect: "curve", intensity: 55 },
-  { id: "r5", start: 101.9, end: 103.1, effect: "zoomin", intensity: 70 },
-];
-
 export function describeRegion(r: Region): string {
   const label = EFFECT_LABELS[r.effect];
   return `${label} ${r.start.toFixed(1)}s–${r.end.toFixed(1)}s (${r.intensity}%)`;
+}
+
+export function describeMarker(m: Marker): string {
+  const label =
+    m.type === "kill" ? "Kill" : m.type === "hit" ? "Hit" : "Exciting";
+  return `${label} @ ${m.timestamp.toFixed(1)}s`;
 }
 
 export function formatTime(sec: number): string {
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+/**
+ * Suggest edit regions from markers — mirrors the legacy
+ * `regions_from_moments` (slow-mo + zoom-in around each kill).
+ */
+export function regionsFromMarkers(
+  markers: Marker[],
+  duration: number
+): Region[] {
+  const out: Region[] = [];
+  for (const m of markers) {
+    if (m.type !== "kill") continue;
+    out.push({
+      start: Math.max(0, m.timestamp - 0.4),
+      end: Math.min(duration, m.timestamp + 0.8),
+      effect: "slowmo",
+      intensity: Math.round(m.intensity),
+    });
+    out.push({
+      start: Math.max(0, m.timestamp - 0.3),
+      end: Math.min(duration, m.timestamp + 1.0),
+      effect: "zoomin",
+      intensity: 65,
+    });
+  }
+  return out.sort((a, b) => a.start - b.start);
 }

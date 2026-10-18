@@ -1,85 +1,156 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import HeaderBar from "./components/HeaderBar";
 import LibraryDock from "./components/LibraryDock";
 import PreviewPane from "./components/PreviewPane";
 import SettingsDock from "./components/SettingsDock";
 import Timeline from "./components/Timeline";
 import {
-  DURATION,
-  MOCK_MOMENTS,
-  MOCK_REGIONS,
-  formatTime,
+  analyzeMoments,
+  importVideo,
+  isRunningInTauri,
+  listSources,
+  onInputEvent,
+  onRecordingTick,
+  onRenderProgress,
+  renderVideo,
+  startRecording,
+  stopRecording,
   type EffectType,
+  type Marker,
   type Region,
-} from "./mockData";
-
-let nextId = 100;
+} from "./ipc/tauriApi";
+import { formatTime, regionsFromMarkers } from "./mockData";
 
 export default function App() {
-  const [moments, setMoments] = useState(MOCK_MOMENTS);
-  const [regions, setRegions] = useState<Region[]>(MOCK_REGIONS);
-  const [selectedRegionId, setSelectedRegionId] = useState<string | null>(
-    "r1"
-  );
+  const [markers, setMarkers] = useState<Marker[]>([]);
+  const [regions, setRegions] = useState<Region[]>([]);
+  const [selectedRegion, setSelectedRegion] = useState<number | null>(null);
+  const [sourceOptions, setSourceOptions] = useState<
+    Array<{ id: string; label: string }>
+  >([]);
+  const [sourceId, setSourceId] = useState<string>("");
+  const [sessionId, setSessionId] = useState<string>("");
+  const [videoPath, setVideoPath] = useState<string>("");
+  const [duration, setDuration] = useState(0);
   const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed] = useState(0);
-  const [playhead] = useState(32);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [log, setLog] = useState<string[]>([
-    "FlickCut editor spike — mock session loaded.",
-    `${MOCK_MOMENTS.length} moments, ${MOCK_REGIONS.length} suggested regions.`,
+    `FlickCut editor — contract v1, ${isRunningInTauri() ? "Tauri shell" : "mock backend"}.`,
   ]);
-  const timer = useRef<number | null>(null);
 
-  const addLog = (line: string) =>
-    setLog((l) => [...l.slice(-49), line]);
+  const addLog = (line: string) => setLog((l) => [...l.slice(-49), line]);
 
-  // recording timer
+  // boot: capture sources (contract: { screens, windows })
   useEffect(() => {
-    if (recording) {
-      timer.current = window.setInterval(() => setElapsed((e) => e + 1), 1000);
-    } else if (timer.current) {
-      window.clearInterval(timer.current);
-      timer.current = null;
-    }
+    listSources()
+      .then((s) => {
+        const opts = [
+          ...s.screens.map((x) => ({ id: x.id, label: `🖥 ${x.name}` })),
+          ...s.windows.map((x) => ({ id: x.id, label: `🪟 ${x.title}` })),
+        ];
+        setSourceOptions(opts);
+        if (opts.length > 0) setSourceId(opts[0].id);
+        addLog(`Sources: ${opts.map((o) => o.label).join(", ")}.`);
+      })
+      .catch((e) => addLog(`list_sources failed: ${String(e)}`));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // contract events while recording
+  useEffect(() => {
+    if (!recording) return;
+    const offTick = onRecordingTick((t) => setElapsed(t.elapsed_sec));
+    const offInput = onInputEvent((e) =>
+      addLog(`input: ${e.source}/${e.action} @ ${(e.t_ms / 1000).toFixed(1)}s`)
+    );
     return () => {
-      if (timer.current) window.clearInterval(timer.current);
+      offTick();
+      offInput();
     };
   }, [recording]);
 
-  const selectedRegion =
-    regions.find((r) => r.id === selectedRegionId) ?? null;
+  // contract event: render progress
+  useEffect(() => {
+    return onRenderProgress((p) => {
+      setProgress(p.percent);
+      if (p.percent >= 100) setBusy(false);
+    });
+  }, []);
 
-  const patchRegion = (id: string, patch: Partial<Region>) =>
-    setRegions((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  const region = selectedRegion != null ? regions[selectedRegion] : null;
 
-  const toggleRecording = () => {
-    if (recording) {
-      setRecording(false);
-      addLog(`Recording stopped at ${formatTime(elapsed)} — session saved.`);
-    } else {
-      setRecording(true);
-      setElapsed(0);
-      addLog("Recording started — capturing screen + input telemetry.");
+  const patchRegion = (index: number, patch: Partial<Region>) =>
+    setRegions((rs) =>
+      rs.map((r, i) => (i === index ? { ...r, ...patch } : r))
+    );
+
+  /** stop -> analyze -> suggest regions (shared by record + import) */
+  const finishSession = async (sid: string, vpath: string, dur: number) => {
+    setVideoPath(vpath);
+    setDuration(dur);
+    try {
+      const { markers: ms } = await analyzeMoments(sid);
+      setMarkers(ms);
+      const rs = regionsFromMarkers(ms, dur);
+      setRegions(rs);
+      setSelectedRegion(rs.length > 0 ? 0 : null);
+      addLog(`Analyzed: ${ms.length} markers, ${rs.length} regions suggested.`);
+    } catch (e) {
+      addLog(`analyze_moments failed: ${String(e)}`);
     }
   };
 
-  const fakeProgress = (label: string, done: string) => {
+  const toggleRecording = async () => {
+    if (busy) return;
+    if (recording) {
+      try {
+        const { video_path, duration_sec } = await stopRecording();
+        const sid = sessionId;
+        setRecording(false);
+        setSessionId("");
+        addLog(`Recording stopped — ${duration_sec}s saved.`);
+        await finishSession(sid, video_path, duration_sec);
+      } catch (e) {
+        addLog(`stop_recording failed: ${String(e)}`);
+      }
+      return;
+    }
+    try {
+      const { session_id } = await startRecording(sourceId);
+      setSessionId(session_id);
+      setRecording(true);
+      setElapsed(0);
+      setMarkers([]);
+      setRegions([]);
+      setSelectedRegion(null);
+      addLog(`Recording started (${session_id}) on ${sourceId}.`);
+    } catch (e) {
+      addLog(`start_recording failed: ${String(e)}`);
+    }
+  };
+
+  const runRender = async (label: string) => {
+    if (!videoPath) {
+      addLog("Nothing to render — record or import first.");
+      return;
+    }
+    if (regions.length === 0) {
+      addLog("No regions — they are suggested automatically after recording.");
+      return;
+    }
     setBusy(true);
     setProgress(0);
-    const iv = window.setInterval(() => {
-      setProgress((p) => {
-        if (p >= 100) {
-          window.clearInterval(iv);
-          setBusy(false);
-          addLog(done);
-          return 100;
-        }
-        return p + 10;
-      });
-    }, 120);
     addLog(label);
+    try {
+      const { output_path } = await renderVideo(videoPath, regions);
+      addLog(`Done: ${output_path}`);
+    } catch (e) {
+      addLog(`render_video failed: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -94,84 +165,115 @@ export default function App() {
       <HeaderBar
         elapsed={formatTime(elapsed)}
         recording={recording}
-        version="0.3.0-spike"
+        version="0.3.0-tauri"
       />
-      <div style={{ flex: 1, display: "flex", gap: 10, padding: 12, minHeight: 0 }}>
+      <div
+        style={{ flex: 1, display: "flex", gap: 10, padding: 12, minHeight: 0 }}
+      >
         <LibraryDock
-          moments={moments}
+          markers={markers}
           regions={regions}
-          selectedRegionId={selectedRegionId}
-          onSelectRegion={setSelectedRegionId}
-          onDeleteMoment={(id) => {
-            setMoments((ms) => ms.filter((m) => m.id !== id));
-            addLog("Moment deleted.");
+          selectedRegion={selectedRegion}
+          onSelectRegion={setSelectedRegion}
+          onDeleteMarker={(i) => {
+            setMarkers((ms) => ms.filter((_, j) => j !== i));
+            addLog("Marker deleted.");
           }}
-          onClearMoments={() => {
-            setMoments([]);
-            addLog("All moments cleared.");
+          onClearMarkers={() => {
+            setMarkers([]);
+            addLog("All markers cleared.");
           }}
         />
-        <PreviewPane recording={recording} />
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            minWidth: 0,
+          }}
+        >
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span style={{ fontSize: 12, color: "#a1a8b6" }}>Source</span>
+            <select
+              className="input"
+              style={{ maxWidth: 280 }}
+              value={sourceId}
+              onChange={(e) => setSourceId(e.target.value)}
+              disabled={recording}
+            >
+              {sourceOptions.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <PreviewPane recording={recording} />
+        </div>
         <SettingsDock
-          region={selectedRegion}
+          region={region}
           recording={recording}
           busy={busy}
           progress={progress}
           log={log}
           onEffectChange={(e: EffectType) => {
-            if (selectedRegionId)
-              patchRegion(selectedRegionId, { effect: e });
+            if (selectedRegion != null)
+              patchRegion(selectedRegion, { effect: e });
           }}
           onIntensityChange={(v) => {
-            if (selectedRegionId)
-              patchRegion(selectedRegionId, { intensity: v });
+            if (selectedRegion != null)
+              patchRegion(selectedRegion, { intensity: v });
           }}
           onBoundsChange={(start, end) => {
-            if (selectedRegionId && end > start && start >= 0)
-              patchRegion(selectedRegionId, { start, end });
+            if (selectedRegion != null && end > start && start >= 0)
+              patchRegion(selectedRegion, { start, end });
           }}
           onAddRegion={() => {
-            const id = `r${nextId++}`;
-            const c = playhead > 0 ? playhead : DURATION / 2;
+            const c = elapsed > 0 ? elapsed : duration / 2 || 30;
             const nr: Region = {
-              id,
               start: Math.max(0, c - 0.6),
-              end: Math.min(DURATION, c + 0.6),
+              end: Math.min(duration || 120, c + 0.6),
               effect: "slowmo",
               intensity: 70,
             };
-            setRegions((rs) => [...rs, nr].sort((a, b) => a.start - b.start));
-            setSelectedRegionId(id);
-            addLog(`Region added: ${nr.start.toFixed(1)}s–${nr.end.toFixed(1)}s.`);
+            setRegions((rs) => {
+              const next = [...rs, nr].sort((a, b) => a.start - b.start);
+              setSelectedRegion(next.indexOf(nr));
+              return next;
+            });
+            addLog(
+              `Region added: ${nr.start.toFixed(1)}s–${nr.end.toFixed(1)}s.`
+            );
           }}
           onDeleteRegion={() => {
-            if (!selectedRegionId) return;
-            setRegions((rs) => rs.filter((r) => r.id !== selectedRegionId));
-            setSelectedRegionId(null);
+            if (selectedRegion == null) return;
+            setRegions((rs) => rs.filter((_, i) => i !== selectedRegion));
+            setSelectedRegion(null);
             addLog("Region deleted.");
           }}
           onToggleRecording={toggleRecording}
-          onImport={() => addLog("Import video — mock: 5 moments detected.")}
-          onAutoEdit={() =>
-            fakeProgress(
-              "Auto-Edit: rendering regions…",
-              "Auto-Edit done — preview ready (mock)."
-            )
-          }
-          onExport={() =>
-            fakeProgress(
-              "Export: rendering highlights…",
-              "Export done: highlights.mp4 (mock)."
-            )
-          }
+          onImport={async () => {
+            try {
+              // mock path — the shell will open a file dialog
+              const { session_id: sid } = await importVideo("/mock/import.mp4");
+              addLog(`Import: session ${sid}.`);
+              await finishSession(sid, "/mock/import.mp4", 124.5);
+            } catch (e) {
+              addLog(`import_video failed: ${String(e)}`);
+            }
+          }}
+          onAutoEdit={() => runRender("Auto-Edit: rendering regions…")}
+          onExport={() => runRender("Export: rendering highlights…")}
         />
       </div>
       <Timeline
-        moments={moments}
+        markers={markers}
         regions={regions}
-        selectedRegionId={selectedRegionId}
-        playhead={playhead}
-        onSelectRegion={setSelectedRegionId}
+        duration={duration || 124.5}
+        selectedRegion={selectedRegion}
+        playhead={elapsed}
+        onSelectRegion={setSelectedRegion}
       />
     </div>
   );

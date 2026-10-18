@@ -1,53 +1,50 @@
 import { MOMENT_COLORS, THEME } from "../theme";
-import { formatTime, type Moment, type Region } from "../mockData";
-import { describeRegion } from "../mockData";
+import { describeMarker, describeRegion } from "../mockData";
+import type { Marker, Region } from "../ipc/tauriApi";
 
 interface Props {
-  moments: Moment[];
+  markers: Marker[];
   regions: Region[];
-  selectedRegionId: string | null;
-  onSelectRegion: (id: string | null) => void;
-  onDeleteMoment: (id: string) => void;
-  onClearMoments: () => void;
+  selectedRegion: number | null; // index into regions
+  onSelectRegion: (index: number | null) => void;
+  onDeleteMarker: (index: number) => void;
+  onClearMarkers: () => void;
 }
 
 export default function LibraryDock({
-  moments,
+  markers,
   regions,
-  selectedRegionId,
+  selectedRegion,
   onSelectRegion,
-  onDeleteMoment,
-  onClearMoments,
+  onDeleteMarker,
+  onClearMarkers,
 }: Props) {
   return (
     <aside className="dock" style={{ width: 264 }}>
       <div className="section">MOMENTS</div>
       <div className="list" style={{ flex: 1, minHeight: 120 }}>
-        {moments.map((m) => (
-          <div key={m.id} className="list-row">
+        {markers.map((m, i) => (
+          <div key={i} className="list-row">
             <span
               className="diamond"
               style={{ background: MOMENT_COLORS[m.type] }}
             />
-            <span style={{ flex: 1 }}>
-              {formatTime(m.timestamp)} —{" "}
-              {m.type.charAt(0).toUpperCase() + m.type.slice(1)}
-            </span>
+            <span style={{ flex: 1 }}>{describeMarker(m)}</span>
             <button
               className="icon-btn"
-              title="Delete moment"
-              onClick={() => onDeleteMoment(m.id)}
+              title="Delete marker"
+              onClick={() => onDeleteMarker(i)}
             >
               ✕
             </button>
           </div>
         ))}
-        {moments.length === 0 && (
+        {markers.length === 0 && (
           <div style={{ color: THEME.faint, padding: 8 }}>No moments yet.</div>
         )}
       </div>
       <div style={{ display: "flex", gap: 8 }}>
-        <button className="btn" style={{ flex: 1 }} onClick={onClearMoments}>
+        <button className="btn" style={{ flex: 1 }} onClick={onClearMarkers}>
           Clear all
         </button>
       </div>
@@ -55,13 +52,11 @@ export default function LibraryDock({
         EDIT REGIONS
       </div>
       <div className="list" style={{ flex: 1, minHeight: 120 }}>
-        {regions.map((r) => (
+        {regions.map((r, i) => (
           <div
-            key={r.id}
-            className={`list-row ${r.id === selectedRegionId ? "selected" : ""}`}
-            onClick={() =>
-              onSelectRegion(r.id === selectedRegionId ? null : r.id)
-            }
+            key={i}
+            className={`list-row ${i === selectedRegion ? "selected" : ""}`}
+            onClick={() => onSelectRegion(i === selectedRegion ? null : i)}
             style={{ cursor: "pointer" }}
           >
             <span style={{ flex: 1 }}>{describeRegion(r)}</span>
