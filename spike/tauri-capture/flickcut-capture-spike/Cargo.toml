@@ -1,0 +1,16 @@
+[package]
+name = "flickcut-capture-spike"
+version = "0.1.0"
+edition = "2021"
+description = "FlickCut Tauri v2 spike: native screen-capture feasibility prototype (Linux/xcap path)"
+
+[dependencies]
+# Linux screenshot path (X11). The recommended per-platform stack is:
+#   Windows: windows-capture = "2"   (Windows Graphics Capture API, MIT)
+#   macOS:   screencapturekit = "11" (ScreenCaptureKit bindings, MIT/Apache-2.0)
+#   Linux:   PipeWire via xdg-desktop-portal for video; xcap for screenshots
+# Those crates are cfg(target_os)-gated and can only be compile-verified on
+# their native targets (see SPIKE_REPORT.md); they are intentionally NOT
+# listed here so this crate builds on any host.
+xcap = "0.9"
+image = "0.25"
