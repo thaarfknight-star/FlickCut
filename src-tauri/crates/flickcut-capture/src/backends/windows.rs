@@ -15,7 +15,8 @@ use crate::recorder::CaptureError;
 use crate::sources::{SourceList, SourceRef};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use std::time::Duration;
-use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler, InternalCaptureControl};
+use windows_capture::capture::{CaptureControl, Context, GraphicsCaptureApiHandler};
+use windows_capture::graphics_capture_api::InternalCaptureControl;
 use windows_capture::frame::Frame;
 use windows_capture::monitor::Monitor;
 use windows_capture::settings::{
@@ -152,3 +153,4 @@ impl Backend for WindowsBackend {
         }
     }
 }
+
