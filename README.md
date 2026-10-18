@@ -34,3 +34,6 @@ I release FlickCut under two licenses — pick whichever suits you best:
 
 Copyright (c) 2026 Taha Arefi. The FlickCut name and logo are my trademarks — they're not
 covered by the licenses above.
+
+Note: my earlier versions (up to 0.3.x) were released under the GNU AGPL v3.0 — those stay
+under that license. This rewrite is under the dual MIT/Apache-2.0 license above.

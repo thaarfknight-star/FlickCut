@@ -3,7 +3,7 @@ name = "flickcut-engine"
 version = "0.1.0"
 edition = "2021"
 description = "FlickCut edit engine core: region timeline model and evaluation (spike prototype)"
-license = "AGPL-3.0-only"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "flickcut_engine"
