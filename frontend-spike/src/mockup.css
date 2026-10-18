@@ -1,5 +1,8 @@
 /* FlickCut mockup design system — ported from Taha's UI/UX mockup.
-   Dark theme + chrome gradient, angled clip-path buttons, Exo 2 italic headings. */
+   Dark theme + chrome gradient, angled clip-path buttons, Exo 2 italic headings.
+   Exo 2 is bundled locally (public/fonts) — no network needed. */
+@font-face{font-family:"Exo 2";font-style:normal;font-weight:400 600;font-display:swap;src:url("/fonts/exo2-normal.woff2") format("woff2")}
+@font-face{font-family:"Exo 2";font-style:italic;font-weight:600 800;font-display:swap;src:url("/fonts/exo2-italic.woff2") format("woff2")}
 :root{color-scheme:dark;--bg:#000;--p1:#0b0d10;--p2:#13161b;--line:#272c35;--tx:#e8edf4;--mut:#8a94a4;--rec:#ff3b4a;--ice:#bcd3f2;
 --chrome:linear-gradient(135deg,#fff 0%,#aab4c3 38%,#eef2f8 55%,#7d8797 100%);box-sizing:border-box}
 *{box-sizing:border-box}html,body{height:100%;margin:0;background:#000;color:var(--tx);font:400 14px/1.4 "Exo 2",system-ui,sans-serif}
