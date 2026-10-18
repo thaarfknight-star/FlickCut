@@ -236,7 +236,7 @@ async fn start_recording(
     // Input telemetry on the shared session epoch. If telemetry was already
     // running (e.g. a manual input_start), restart it so the epochs match.
     {
-        let t = telemetry.lock().map_err(|e| e.to_string())?;
+        let mut t = telemetry.lock().map_err(|e| e.to_string())?;
         if t.running() {
             t.stop();
         }
@@ -305,7 +305,7 @@ async fn stop_recording(
 
     // Snapshot telemetry before stopping capture.
     let (events, trail) = {
-        let t = telemetry.lock().map_err(|e| e.to_string())?;
+        let mut t = telemetry.lock().map_err(|e| e.to_string())?;
         t.stop();
         (t.events(), t.trail())
     };
