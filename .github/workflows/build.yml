@@ -34,21 +34,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cleanup old caches
-        # Temporarily disabled - was breaking builds (exit code 5)
-        # TODO: fix and re-enable
-        if: false
-        # Keep only the most recent cache per key prefix; delete the rest
-        # to stay within GitHub's cache quota. Runs on every build.
+      - name: Cleanup old caches (anti-cache)
+        # Deletes all but the newest cache to stay within GitHub's cache quota.
+        # continue-on-error ensures this never breaks the build.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          # List all caches, keep newest per key prefix, delete the rest
-          gh api "/repos/${{ github.repository }}/actions/caches?per_page=100" --paginate             | jq -r '.actions_caches | sort_by(.created_at) | reverse | .[] | "\(.id) \(.key)"'             | awk '{key=$2; sub(/-[0-9a-f]+$/, "", key); if (seen[key]++) print $1}'             | while read -r cache_id; do
-              echo "Deleting old cache $cache_id"
-              gh api -X DELETE "/repos/${{ github.repository }}/actions/caches/$cache_id" || true
-            done
+          echo "Checking for old caches to clean..."
+          IDS=$(gh api "/repos/${{ github.repository }}/actions/caches?per_page=100" -q '.actions_caches | sort_by(.created_at) | .[0:-1] | .[].id' 2>/dev/null || true)
+          if [ -z "$IDS" ]; then
+            echo "No old caches to delete."
+            exit 0
+          fi
+          for cid in $IDS; do
+            echo "Deleting old cache $cid"
+            gh api -X DELETE "/repos/${{ github.repository }}/actions/caches/$cid" >/dev/null 2>&1 || true
+          done
+          echo "Cache cleanup done."
 
       - name: Setup Node
         uses: actions/setup-node@v4
