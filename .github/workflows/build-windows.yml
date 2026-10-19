@@ -93,12 +93,16 @@ jobs:
           projectPath: src-tauri
           args: --target x86_64-pc-windows-msvc --config ci-override.json
 
-      - name: Upload Windows Setup installer
-        uses: actions/upload-artifact@v4
+      - name: Upload Windows Setup to Release
+        # Bypass the Actions artifact quota by uploading straight to a
+        # GitHub Release (separate storage, no 500MB Actions limit).
+        uses: softprops/action-gh-release@v2
         with:
-          name: flickcut-windows-setup
-          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-          if-no-files-found: error
+          tag_name: windows-setup-latest
+          name: FlickCut Windows Setup (latest)
+          prerelease: true
+          files: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          fail_on_unmatched_files: true
 
       - name: Report Setup size
         shell: bash
