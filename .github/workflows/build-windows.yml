@@ -1,0 +1,110 @@
+# FlickCut — Windows-only Setup build.
+#
+# Builds ONLY the Windows NSIS Setup installer (.exe).
+# Trigger manually via workflow_dispatch, or on push to main.
+# Per Taha's order (2026-10-19): Windows Setup output only.
+name: Build Windows Setup
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-windows.yml'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cleanup old caches (anti-cache)
+        # Deletes all but the newest cache to stay within GitHub's cache quota.
+        # continue-on-error ensures this never breaks the build.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          echo "Checking for old caches to clean..."
+          IDS=$(gh api "/repos/${{ github.repository }}/actions/caches?per_page=100" -q '.actions_caches | sort_by(.created_at) | .[0:-1] | .[].id' 2>/dev/null || true)
+          if [ -z "$IDS" ]; then
+            echo "No old caches to delete."
+            exit 0
+          fi
+          for cid in $IDS; do
+            echo "Deleting old cache $cid"
+            gh api -X DELETE "/repos/${{ github.repository }}/actions/caches/$cid" >/dev/null 2>&1 || true
+          done
+          echo "Cache cleanup done."
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend-spike/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend-spike
+
+      # Test builds skip updater artifact signing (no key yet). The override
+      # deep-merges over tauri.conf.json; release builds keep artifacts on.
+      - name: Write CI config override
+        run: echo '{"bundle":{"createUpdaterArtifacts":false}}' > src-tauri/ci-override.json
+
+      # Bundles a static ffmpeg as a Tauri v2 sidecar so render_video works
+      # on the user's machine. Pinned to BtbN ffmpeg 8.1 (GPL with libx264).
+      - name: Cache ffmpeg sidecar
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/binaries/
+          key: ffmpeg-v1-x86_64-pc-windows-msvc
+
+      - name: Download ffmpeg sidecar
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p src-tauri/binaries
+          # BtbN ffmpeg 8.1 stable branch, GPL with libx264.
+          curl -sSfL -o /tmp/ffmpeg.zip \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-8.1.zip"
+          7z x /tmp/ffmpeg.zip -o/tmp/ff -y
+          cp /tmp/ff/ffmpeg-*/bin/ffmpeg.exe \
+             "src-tauri/binaries/ffmpeg-x86_64-pc-windows-msvc.exe"
+          echo "--- sidecar binaries ---"
+          ls -lh src-tauri/binaries/
+          BIN="$(ls src-tauri/binaries/ffmpeg-* | head -1)"
+          "$BIN" -hide_banner -h encoder=libx264 2>&1 | head -3
+
+      - name: Build Windows Setup with Tauri Action
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: src-tauri
+          args: --target x86_64-pc-windows-msvc --config ci-override.json
+
+      - name: Upload Windows Setup installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: flickcut-windows-setup
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+      - name: Report Setup size
+        shell: bash
+        run: |
+          echo "### Windows Setup installer" >> "$GITHUB_STEP_SUMMARY"
+          find src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis \
+            -type f -name '*.exe' \
+            -exec ls -lh {} \; 2>/dev/null \
+            | awk '{print "- " $9 " (" $5 ")"}' >> "$GITHUB_STEP_SUMMARY" || true
